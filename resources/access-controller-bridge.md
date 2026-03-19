@@ -50,13 +50,13 @@ There is no mechanism for these authorization models to communicate. An entity a
 
 ### 2.1 Hierarchies (`hierarchies::main`)
 
-Hierarchies implements an **organized delegation of trust** — not a binary choice between centralization and decentralization, but authority distributed according to competence and context. A physician's diagnosis carries weight because of demonstrated capability; a university's degree carries weight because of accreditation by a recognized authority.
+Hierarchies implements an **organized delegation of trust** — not a binary choice between centralization and decentralization, but authority distributed according to competence and context. A certified fish inspector's catch report carries weight because of demonstrated capability; a fishing vessel's sustainability claim carries weight because of accreditation by a recognized maritime authority.
 
 The Federation is the core governance object:
 
 ```text
 Federation
-  ├── Properties         (what claims are recognized: "degree_type", "ISO_certification", etc.)
+  ├── Properties         (what claims are recognized: "catch_species", "fishing_zone", etc.)
   ├── Root Authorities   (ultimate governance — define properties, manage accreditations)
   ├── Accreditations to Accredit  (right to DELEGATE trust to others)
   └── Accreditations to Attest    (right to MAKE verifiable claims)
@@ -70,7 +70,7 @@ Three natural **trust levels** emerge from this structure:
 | Accreditor | Delegator | Can delegate trust to others within property scope |
 | Attester | Claimant | Can make verifiable claims within property scope |
 
-Each accreditation is **scoped to specific properties** — an entity accredited for "degree_type" cannot attest "medical_license". This property-scoping is a first-class concept in hierarchies.
+Each accreditation is **scoped to specific properties** — an entity accredited for "catch_species" cannot attest "vessel_safety". This property-scoping is a first-class concept in hierarchies.
 
 **Key characteristic**: Hierarchies is an **authority source** that expresses domain-level trust. It determines who is trusted to say what, within which domain. It is not a general-purpose permission system — its properties represent real-world domain concepts, not operational buttons.
 
@@ -134,9 +134,9 @@ The `RoleMap` living inside `AuditTrail` creates fundamental problems:
 
 ### 3.2 The Analogy
 
-A notary's authority to notarize comes from a state licensing body, not from the stamp. A physician's ability to prescribe comes from a medical license, not from the prescription pad.
+A fisherman's authority to log certified catches comes from the maritime authority, not from the logbook. A port inspector's ability to certify a landing comes from their accreditation, not from the form they fill in.
 
-The audit trail is currently a prescription pad that decides who can use it. It should be a prescription pad that verifies you hold a valid medical license — issued by an external authority.
+The audit trail is currently a logbook that decides who can write in it. It should be a logbook that verifies you hold a valid fishing license — issued by the maritime authority.
 
 ### 3.3 Notarization Gets It Right (For Its Scope)
 
@@ -225,9 +225,9 @@ The proposed pattern generalizes this from "transfer authorization" to "any oper
 
 ### 6.1 What Hierarchies IS and IS NOT
 
-**IS**: A trust delegation framework. It expresses *"Entity X is trusted by federation F to make claims about property P."* This is semantic, domain-level trust — a university trusted to issue degrees, a lab trusted to certify safety standards.
+**IS**: A trust delegation framework. It expresses *"Entity X is trusted by federation F to make claims about property P."* This is semantic, domain-level trust — a fishing vessel trusted to report catches, a port inspector trusted to certify landings.
 
-**IS NOT**: A general-purpose permission database. It does not store "User X can click button Y." Properties like "degree_type", "ISO_certification", "medical_specialty" are domain concepts, not operational flags.
+**IS NOT**: A general-purpose permission database. It does not store "User X can click button Y." Properties like "catch_species", "fishing_zone", "vessel_capacity" are domain concepts, not operational flags.
 
 ### 6.2 The Natural Mapping: Trust Level + Property Scope
 
@@ -243,9 +243,9 @@ The bridge does NOT create arbitrary mappings from properties to permissions. In
 
 **Dimension 2: Property Scope** — your accreditation properties determine WHICH component instances you can access:
 
-- Accredited for "degree_type" → can operate on the degree records audit trail
-- Accredited for "ISO_9001" → can operate on the quality certification audit trail
-- NOT accredited for "medical_license" → cannot touch the medical records trail
+- Accredited for "catch_species" → can operate on the catch records audit trail
+- Accredited for "vessel_safety" → can operate on the safety inspection audit trail
+- NOT accredited for "port_inspection" → cannot touch the port landing records trail
 
 This mapping is natural, not forced. It preserves hierarchies' intent:
 
@@ -280,7 +280,7 @@ public struct ComponentLink<phantom P: drop> has key, store {
 }
 ```
 
-This is created once per federation-component pairing. For example: *"Federation 'EuropeanUniversities' governs audit trail 'DegreeRecords'. Entities accredited for property 'degree_type' can access it. Attesters can add/correct records. Accreditors can also delete records and update metadata. Root authorities have full admin access."*
+This is created once per federation-component pairing. For example: *"Federation 'NorthAtlanticFisheries' governs audit trail 'CatchRecords'. Entities accredited for property 'catch_species' can access it. Attesters (fishermen) can add/correct records. Accreditors (regional inspectors) can also delete records and update metadata. Root authorities (maritime authority) have full admin access."*
 
 ### 6.4 Why This Preserves Hierarchies' Intent
 
@@ -288,7 +288,7 @@ The federation doesn't know about audit trails or their operations. It continues
 
 The `ComponentLink` is the bridge's configuration — it lives in the bridge package, not in hierarchies. Hierarchies is not modified. The bridge reads federation state (accreditation checks) and translates it.
 
-Properties are NOT repurposed as permission names. "degree_type" remains a domain property. The bridge uses the fact that an entity is accredited for "degree_type" to determine their trust level for the degree records trail — the same way a hospital uses the fact that a physician has a medical license to determine their access to patient records.
+Properties are NOT repurposed as permission names. "catch_species" remains a domain property. The bridge uses the fact that a fisherman is accredited for "catch_species" to determine their trust level for the catch records trail — the same way a port authority uses the fact that a vessel holds a valid fishing license to determine its access to landing documentation.
 
 ---
 
@@ -538,7 +538,7 @@ public fun add_record<D: store + copy>(
 
 ### 7.4 End-to-End Example: Full PTB
 
-A university registrar (attester in federation "EuropeanUniversities") adds a degree record to the "DegreeRecords" audit trail:
+A fisherman (attester in federation "NorthAtlanticFisheries") adds a catch record to the "CatchRecords" audit trail:
 
 ```move
 // === Single Programmable Transaction Block ===
@@ -548,8 +548,8 @@ let request = audit_trail::request_add_record(&trail, ctx);
 
 // Step 2: Hierarchies adapter verifies trust standing and approves
 let approval = hierarchies_adapter::approve(
-    &federation,        // EuropeanUniversities federation
-    &accredit_cap,      // registrar's AccreditCap
+    &federation,        // NorthAtlanticFisheries federation
+    &accredit_cap,      // fisherman's AccreditCap
     &component_link,    // links this federation to this trail
     &request,           // borrows the request to inspect it
     clock,
@@ -561,8 +561,8 @@ audit_trail::add_record(
     &mut trail,
     request,            // consumed (hot potato)
     approval,           // consumed (hot potato)
-    degree_data,
-    some(b"PhD in Computer Science"),
+    catch_data,
+    some(b"Atlantic Cod, 320kg, Zone 5a"),
     clock,
     ctx,
 );
@@ -698,7 +698,7 @@ Each increment is independently valuable and deployable.
 
 **Idea**: An earlier version of this proposal mapped federation properties (e.g., "record_writer") directly to audit trail permissions (e.g., `AddRecord`).
 
-**Why rejected**: This misuses hierarchies. It requires inventing artificial properties that are really operational flags. Properties should remain domain concepts ("degree_type", "ISO_certification"). The correct abstraction is the two-dimensional mapping: trust level (root/accreditor/attester) determines operation category, property scope determines which component instances.
+**Why rejected**: This misuses hierarchies. It requires inventing artificial properties that are really operational flags. Properties should remain domain concepts ("catch_species", "fishing_zone"). The correct abstraction is the two-dimensional mapping: trust level (root/accreditor/attester) determines operation category, property scope determines which component instances.
 
 ### 11.4 Trade-off: PTB Complexity
 
@@ -780,13 +780,13 @@ The bridge is not a module. **The bridge is a protocol** — `ActionRequest<P>` 
 
 ## Appendix B: Trust Level Mapping — Concrete Example
 
-**Scenario**: Federation "EuropeanUniversities" governs audit trail "DegreeRecords"
+**Scenario**: Federation "NorthAtlanticFisheries" governs audit trail "CatchRecords"
 
 ```text
-Federation Property:  "degree_type" (values: "PhD", "Masters", "Bachelors")
+Federation Property:  "catch_species" (values: "Atlantic Cod", "Haddock", "Mackerel")
 
 ComponentLink configuration:
-  required_properties: ["degree_type"]
+  required_properties: ["catch_species"]
   attester_permissions:    {AddRecord, CorrectRecord}
   accreditor_permissions:  {AddRecord, CorrectRecord, DeleteRecord, UpdateMetadata}
   admin_permissions:       {all 12 permissions}
@@ -795,14 +795,14 @@ Result:
   ┌─────────────────────────┬───────────────────────────────────────────┐
   │ Entity                  │ What they can do                          │
   ├─────────────────────────┼───────────────────────────────────────────┤
-  │ Ministry of Education   │ Full admin (root authority)               │
+  │ Maritime Authority      │ Full admin (root authority)               │
   │ (Root Authority)        │ Delete trail, migrate, configure locking  │
   ├─────────────────────────┼───────────────────────────────────────────┤
-  │ University Consortium   │ Management (accreditor for degree_type)   │
+  │ Regional Inspector      │ Management (accreditor for catch_species) │
   │ (Accreditor)            │ Add/correct/delete records, update metadata│
   ├─────────────────────────┼───────────────────────────────────────────┤
-  │ Individual University   │ Write access (attester for degree_type)   │
-  │ (Attester)              │ Add and correct degree records            │
+  │ Licensed Fisherman      │ Write access (attester for catch_species) │
+  │ (Attester)              │ Add and correct catch records             │
   ├─────────────────────────┼───────────────────────────────────────────┤
   │ Random entity with no   │ Nothing. No accreditation = no access.    │
   │ federation standing     │ Request created, approval denied, PTB     │
@@ -851,21 +851,21 @@ A federation root authority creates the `ComponentLink` that connects a federati
 
 ```mermaid
 sequenceDiagram
-    participant RA as Root Authority<br/>(Ministry of Education)
-    participant Fed as Federation<br/>"EuropeanUniversities"
+    participant RA as Root Authority<br/>(Maritime Authority)
+    participant Fed as Federation<br/>"NorthAtlanticFisheries"
     participant Bridge as Bridge Package
-    participant Trail as AuditTrail<br/>"DegreeRecords"
+    participant Trail as AuditTrail<br/>"CatchRecords"
 
     Note over RA,Trail: One-time setup: connect federation governance to component
 
-    RA->>Fed: add_property("degree_type", allowed: PhD/Masters/Bachelors)
+    RA->>Fed: add_property("catch_species", allowed: Cod/Haddock/Mackerel)
     Fed-->>RA: Property registered
 
-    RA->>Fed: create_accreditation_to_attest(university_id, ["degree_type"])
-    Fed-->>RA: University accredited as attester
+    RA->>Fed: create_accreditation_to_attest(fisherman_id, ["catch_species"])
+    Fed-->>RA: Fisherman accredited as attester
 
-    RA->>Bridge: create_component_link(<br/>  federation_id,<br/>  trail_id,<br/>  required_properties: ["degree_type"],<br/>  attester_permissions: {AddRecord, CorrectRecord},<br/>  accreditor_permissions: {AddRecord, ..., DeleteRecord, UpdateMetadata},<br/>  admin_permissions: {all 12}<br/>)
-    Bridge-->>RA: ComponentLink<Permission> created (shared object)
+    RA->>Bridge: create_component_link(<br/>  federation_id,<br/>  trail_id,<br/>  required_properties: ["catch_species"],<br/>  attester_permissions: {AddRecord, CorrectRecord},<br/>  accreditor_permissions: {AddRecord, ..., DeleteRecord, UpdateMetadata},<br/>  admin_permissions: {all 12}<br/>)
+    Bridge-->>RA: ComponentLink created (shared object)
 
     Note over Bridge,Trail: The trail itself is NOT modified.<br/>It has no embedded RoleMap.<br/>The ComponentLink is the bridge configuration.
 ```
@@ -882,34 +882,34 @@ The core authorization receipt flow within a single PTB.
 
 ```mermaid
 sequenceDiagram
-    participant Uni as University Registrar<br/>(Attester)
-    participant Trail as AuditTrail<br/>"DegreeRecords"
+    participant Fish as Licensed Fisherman<br/>(Attester)
+    participant Trail as AuditTrail<br/>"CatchRecords"
     participant Adapter as Hierarchies Adapter<br/>(bridge package)
-    participant Fed as Federation<br/>"EuropeanUniversities"
+    participant Fed as Federation<br/>"NorthAtlanticFisheries"
     participant Link as ComponentLink<br/>(bridge config)
 
-    Note over Uni,Link: Single Programmable Transaction Block (PTB)
+    Note over Fish,Link: Single Programmable Transaction Block (PTB)
 
-    Uni->>Trail: request_add_record(&trail, ctx)
-    Trail-->>Uni: ActionRequest<Permission><br/>{ target: trail_id,<br/>  permission: AddRecord,<br/>  requester: uni_address }
+    Fish->>Trail: request_add_record(&trail, ctx)
+    Trail-->>Fish: ActionRequest<br/>{ target: trail_id,<br/>  permission: AddRecord,<br/>  requester: fisherman_addr }
     Note right of Trail: Hot potato created.<br/>MUST be consumed<br/>or PTB aborts.
 
-    Uni->>Adapter: approve(<br/>  &federation,<br/>  &accredit_cap,<br/>  &component_link,<br/>  &request,<br/>  clock, ctx)
-    Adapter->>Fed: is_attester(uni_id)?
+    Fish->>Adapter: approve(<br/>  &federation,<br/>  &accredit_cap,<br/>  &component_link,<br/>  &request,<br/>  clock, ctx)
+    Adapter->>Fed: is_attester(fisherman_id)?
     Fed-->>Adapter: Yes
-    Adapter->>Fed: validate_property(uni_id, "degree_type", ...)
+    Adapter->>Fed: validate_property(fisherman_id, "catch_species", ...)
     Fed-->>Adapter: Valid accreditation
     Adapter->>Link: attester_permissions.contains(AddRecord)?
     Link-->>Adapter: Yes
-    Adapter-->>Uni: ActionApproval<Permission><br/>{ target: trail_id,<br/>  permission: AddRecord,<br/>  authority: ComponentLink }
+    Adapter-->>Fish: ActionApproval<br/>{ target: trail_id,<br/>  permission: AddRecord,<br/>  authority: ComponentLink }
     Note right of Adapter: Second hot potato created.
 
-    Uni->>Trail: add_record(<br/>  &mut trail,<br/>  request,<br/>  approval,<br/>  degree_data,<br/>  metadata,<br/>  clock, ctx)
+    Fish->>Trail: add_record(<br/>  &mut trail,<br/>  request,<br/>  approval,<br/>  catch_data,<br/>  metadata,<br/>  clock, ctx)
     Trail->>Trail: verify_and_consume(request, approval)<br/>Both hot potatoes destructured.
     Trail->>Trail: Insert record into LinkedTable
-    Trail-->>Uni: RecordAdded event
+    Trail-->>Fish: RecordAdded event
 
-    Note over Uni,Link: Both hot potatoes consumed. PTB succeeds.
+    Note over Fish,Link: Both hot potatoes consumed. PTB succeeds.
 ```
 
 **Assets exchanged**:
@@ -956,17 +956,17 @@ A single federation governs multiple components through separate `ComponentLink`
 
 ```mermaid
 flowchart TB
-    Fed["Federation<br/>'EuropeanUniversities'<br/><br/>Properties:<br/>- degree_type<br/>- research_grant<br/>- student_exchange"]
+    Fed["Federation<br/>'NorthAtlanticFisheries'<br/><br/>Properties:<br/>- catch_species<br/>- vessel_safety<br/>- port_inspection"]
 
-    Link1["ComponentLink #1<br/>required_properties: [degree_type]<br/>attester → {AddRecord, CorrectRecord}<br/>accreditor → {+ DeleteRecord, UpdateMetadata}<br/>admin → {all}"]
+    Link1["ComponentLink #1<br/>required_properties: [catch_species]<br/>attester: {AddRecord, CorrectRecord}<br/>accreditor: {+ DeleteRecord, UpdateMetadata}<br/>admin: {all}"]
 
-    Link2["ComponentLink #2<br/>required_properties: [research_grant]<br/>attester → {AddRecord}<br/>accreditor → {+ DeleteRecord}<br/>admin → {all}"]
+    Link2["ComponentLink #2<br/>required_properties: [vessel_safety]<br/>attester: {AddRecord}<br/>accreditor: {+ DeleteRecord}<br/>admin: {all}"]
 
-    Link3["ComponentLink #3<br/>required_properties: [student_exchange]<br/>attester → {AddRecord, CorrectRecord}<br/>admin → {all}"]
+    Link3["ComponentLink #3<br/>required_properties: [port_inspection]<br/>attester: {AddRecord, CorrectRecord}<br/>admin: {all}"]
 
-    Trail1["AuditTrail<br/>'DegreeRecords'"]
-    Trail2["AuditTrail<br/>'GrantRecords'"]
-    Comp3["Future Component<br/>'ExchangeRegistry'"]
+    Trail1["AuditTrail<br/>'CatchRecords'"]
+    Trail2["AuditTrail<br/>'SafetyInspections'"]
+    Comp3["Future Component<br/>'PortLandingRegistry'"]
 
     Fed --> Link1
     Fed --> Link2
@@ -976,16 +976,16 @@ flowchart TB
     Link2 --> Trail2
     Link3 --> Comp3
 
-    Uni["University<br/>(attester for degree_type)"]
-    Lab["Research Lab<br/>(attester for research_grant)"]
+    Fisher["Fisherman<br/>(attester for catch_species)"]
+    Inspector["Safety Inspector<br/>(attester for vessel_safety)"]
 
-    Uni -.->|"can write to"| Trail1
-    Uni -.->|"cannot access<br/>(not accredited for research_grant)"| Trail2
-    Lab -.->|"cannot access<br/>(not accredited for degree_type)"| Trail1
-    Lab -.->|"can write to"| Trail2
+    Fisher -.->|"can write to"| Trail1
+    Fisher -.->|"cannot access<br/>(not accredited for vessel_safety)"| Trail2
+    Inspector -.->|"cannot access<br/>(not accredited for catch_species)"| Trail1
+    Inspector -.->|"can write to"| Trail2
 ```
 
-**Key insight**: Property scope determines which `ComponentLink` (and therefore which component instance) an entity can access. The university is accredited for "degree_type" so it can access the degree trail, but NOT the grant trail. The lab has the opposite access. One federation, multiple components, fine-grained scoping.
+**Key insight**: Property scope determines which `ComponentLink` (and therefore which component instance) an entity can access. The fisherman is accredited for "catch_species" so they can add catch records, but NOT safety inspections. The safety inspector has the opposite access. One federation, multiple components, fine-grained scoping.
 
 ### C.6 Future — Account Abstraction Adapter Flow
 
