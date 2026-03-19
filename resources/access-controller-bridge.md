@@ -2,8 +2,8 @@
 
 ## Integrating Hierarchies, Audit Trails, and Future Components via a Universal Authorization Pattern
 
-**Status**: Proposal
-**Date**: 2026-03-19
+**Status**: Proposal \
+**Date**: 2026-03-19 \
 **Scope**: IOTA Trust Framework — cross-component authorization architecture
 
 ---
@@ -15,29 +15,34 @@
 3. [Architectural Critique](#3-architectural-critique)
 4. [Guiding Principles](#4-guiding-principles)
 5. [Proposed Solution: The Authorization Receipt Pattern](#5-proposed-solution-the-authorization-receipt-pattern)
-6. [Detailed Design](#6-detailed-design)
-7. [Authority Source Adapters](#7-authority-source-adapters)
-8. [Impact on Existing Components](#8-impact-on-existing-components)
+6. [Hierarchies as Authority Source — Respecting Original Intent](#6-hierarchies-as-authority-source--respecting-original-intent)
+7. [Detailed Design](#7-detailed-design)
+8. [Impact on the Audit Trail](#8-impact-on-the-audit-trail)
 9. [Account Abstraction Considerations](#9-account-abstraction-considerations)
-10. [Migration Path](#10-migration-path)
+10. [Incremental Delivery](#10-incremental-delivery)
 11. [Trade-offs and Alternatives Considered](#11-trade-offs-and-alternatives-considered)
 12. [Conclusion](#12-conclusion)
+
+- [Appendix A: Architecture Diagram](#appendix-a-architecture-diagram)
+- [Appendix B: Trust Level Mapping Example](#appendix-b-trust-level-mapping--concrete-example)
+- [Appendix C: Flow Diagrams](#appendix-c-flow-diagrams)
+- [Appendix D: Referenced Materials](#appendix-d-referenced-materials)
 
 ---
 
 ## 1. Problem Statement
 
-The IOTA Trust Framework consists of multiple components — Hierarchies, Notarization (including Audit Trails), Identity, and future additions — each of which needs some form of authorization to control who can perform which operations.
+The IOTA Trust Framework is a modular suite of components — Hierarchies, Notarization (including Audit Trails), Identity — that together establish trust in digital multi-stakeholder environments.
 
 Currently these components solve authorization independently:
 
-- **Hierarchies** manages delegated trust through federations, accreditations, and attestations — answering "who is authorized to make claims about which properties."
-- **Audit Trails** embeds a full RBAC system (`RoleMap` from `tf_components`) inside each trail object — answering "who can perform which operations on this trail."
-- **Notarization** (base) relies on Move's native object ownership — the owner controls the object entirely.
+- **Hierarchies** manages delegated trust through federations, accreditations, and attestations. It answers: *"Is entity X trusted to make claims about property Y?"*
+- **Audit Trails** embeds a full RBAC system (`RoleMap` from `tf_components`) inside each trail instance. It answers: *"Can holder of Capability C perform action A on this specific trail?"*
+- **Notarization** (base) relies on Move's native object ownership — owner controls the object.
 
-There is no mechanism for these authorization models to communicate. Hierarchies cannot influence audit trail permissions. An entity accredited by a federation still needs a separately-issued Capability from the trail's embedded RoleMap to add a record. The two authorization systems exist in parallel, disconnected.
+There is no mechanism for these authorization models to communicate. An entity accredited by a federation to attest domain properties still needs a separately-issued `Capability` from the trail's embedded `RoleMap` to add a record. The two systems exist in parallel, disconnected.
 
-**The goal**: Define a universal pattern — an "access controller bridge" — that allows any component requiring authorization to accept proof of authorization from any authority source, including but not limited to hierarchies.
+**The goal**: Define a universal architectural pattern — an access controller bridge — that allows any component to accept authorization from any authority source. Hierarchies is the primary authority source today, but the pattern must not be coupled to it. It should be a reusable process flow that connects any component needing authorization with any system providing it.
 
 ---
 
@@ -45,55 +50,71 @@ There is no mechanism for these authorization models to communicate. Hierarchies
 
 ### 2.1 Hierarchies (`hierarchies::main`)
 
-The Federation is a **shared object** that implements hierarchical trust delegation:
+Hierarchies implements an **organized delegation of trust** — not a binary choice between centralization and decentralization, but authority distributed according to competence and context. A physician's diagnosis carries weight because of demonstrated capability; a university's degree carries weight because of accreditation by a recognized authority.
+
+The Federation is the core governance object:
 
 ```text
-Root Authority
-  └─> Accreditor (accreditation_to_accredit)
-        └─> Attester (accreditation_to_attest)
-              └─> validates property claims
+Federation
+  ├── Properties         (what claims are recognized: "degree_type", "ISO_certification", etc.)
+  ├── Root Authorities   (ultimate governance — define properties, manage accreditations)
+  ├── Accreditations to Accredit  (right to DELEGATE trust to others)
+  └── Accreditations to Attest    (right to MAKE verifiable claims)
 ```
 
-**Authorization model**: Identity-centric. The federation checks `ctx.sender().to_id()` against its accreditation maps. Authorization is expressed as "entity X can attest/accredit properties Y with values Z."
+Three natural **trust levels** emerge from this structure:
 
-**Capability objects**: `RootAuthorityCap` and `AccreditCap` are Move objects transferred to authorized addresses. They carry a `federation_id` for scoping.
+| Role | Trust Level | Meaning |
+| --- | --- | --- |
+| Root Authority | Sovereign | Defines the domain, manages all governance |
+| Accreditor | Delegator | Can delegate trust to others within property scope |
+| Attester | Claimant | Can make verifiable claims within property scope |
 
-**Key characteristic**: Hierarchies is an **authority source** — it determines who is authorized to do what within its domain (property-based claims). But it has no way to project that authority into other components.
+Each accreditation is **scoped to specific properties** — an entity accredited for "degree_type" cannot attest "medical_license". This property-scoping is a first-class concept in hierarchies.
+
+**Key characteristic**: Hierarchies is an **authority source** that expresses domain-level trust. It determines who is trusted to say what, within which domain. It is not a general-purpose permission system — its properties represent real-world domain concepts, not operational buttons.
 
 ### 2.2 Audit Trails (`audit_trail::main`)
 
-The AuditTrail is a **shared object** that stores sequential records with role-based access control:
+The Audit Trail is a shared object storing sequential, tamper-proof records with embedded RBAC:
 
 ```move
 public struct AuditTrail<D: store + copy> has key, store {
     id: UID,
     records: LinkedTable<u64, Record<D>>,      // DATA
     roles: RoleMap<Permission, RecordTags>,     // GOVERNANCE (embedded)
+    locking_config: LockingConfig,
     // ...
 }
 ```
 
-**Authorization model**: Capability-centric. Every protected operation requires presenting a `tf_components::Capability` that is validated against the trail's embedded `RoleMap`. The `RoleMap` maps roles to permission sets (an enum of 17 permissions: `AddRecord`, `DeleteRecord`, `UpdateMetadata`, etc.).
+The `Permission` enum defines 17 distinct operations:
 
-**Key characteristic**: The audit trail is both the **resource** (data records) and the **governor** (its embedded RoleMap decides who gets access). Authorization is fully self-contained per trail.
+- **Data**: `AddRecord`, `DeleteRecord`, `CorrectRecord`, `DeleteAllRecords`
+- **Metadata**: `UpdateMetadata`, `DeleteMetadata`
+- **Configuration**: `UpdateLockingConfig`, `UpdateLockingConfigForDeleteRecord`, `UpdateLockingConfigForDeleteTrail`, `UpdateLockingConfigForWrite`
+- **Lifecycle**: `DeleteAuditTrail`, `Migrate`
+- **Self-governance**: `AddRoles`, `UpdateRoles`, `DeleteRoles`, `AddCapabilities`, `RevokeCapabilities`
+
+Every protected operation requires presenting a `tf_components::Capability` validated against the trail's embedded `RoleMap`.
+
+**Key characteristic**: The audit trail is both the **resource** (records) and the **governor** (its embedded RoleMap decides access). Authorization is fully self-contained per trail instance.
 
 ### 2.3 Notarization (`iota_notarization::notarization`)
 
-The Notarization object is an **owned object** (not shared) that stores immutable or mutable data:
+The Notarization object is **owned** (not shared). Authorization is Move's native object ownership: if you own it, you control it. `TimeLock` adds temporal constraints.
 
-**Authorization model**: Object ownership. If you own the `Notarization<D>` object, you can update/destroy it. Time-based restrictions (`TimeLock`) add temporal constraints but no identity-based authorization.
-
-**Key characteristic**: The simplest and most Move-native authorization model. No custom RBAC needed because single-owner semantics handle it.
+**Key characteristic**: Correct for single-owner objects. No custom authorization needed.
 
 ### 2.4 Product-Core (`tf_components`)
 
-The shared library provides reusable primitives:
+Shared primitives for the trust framework:
 
-- **`Capability`**: A transferable token with `target_key` (scoped object), `role`, temporal validity (`valid_from`/`valid_until`), and optional address binding (`issued_to`).
-- **`RoleMap<P, D>`**: Generic RBAC mapping roles to custom permission type `P`. Creates an initial admin role with a Capability. Supports role lifecycle, capability issuance/revocation, and denylist for revoked capabilities.
+- **`Capability`**: Transferable authorization token scoped to a target (`target_key`), with role, temporal validity (`valid_from`/`valid_until`), and optional address binding.
+- **`RoleMap<P, D>`**: Generic RBAC mapping roles to custom permission types. Manages role lifecycle, capability issuance/revocation, denylist.
 - **`TimeLock`**: Time-based restrictions (`UnlockAt`, `UntilDestroyed`, `Infinite`, `None`).
 
-**Key characteristic**: These are the right primitives, but `Capability` creation is gated through `RoleMap` (the `new_capability` function requires an existing admin Capability validated by the RoleMap). There is no way for an external authority to issue Capabilities independently.
+**Key limitation**: `Capability` creation is gated through `RoleMap` — only an existing admin Capability (validated by the RoleMap) can issue new Capabilities. No external authority can issue them independently.
 
 ---
 
@@ -101,61 +122,59 @@ The shared library provides reusable primitives:
 
 ### 3.1 The Audit Trail Embeds Governance Inside the Resource
 
-This is the central architectural issue. The `RoleMap` living inside `AuditTrail` means:
+The `RoleMap` living inside `AuditTrail` creates fundamental problems:
 
-**Every trail is a permission silo.** There is no way to express "entity X is authorized across all trails of type Y." Each trail creates its own admin, its own roles, its own capabilities from scratch. Cross-trail authorization requires manual, out-of-band capability delegation for each individual trail.
+**Every trail is a governance silo.** Each trail creates its own admin, roles, and capabilities from scratch. There is no way to express "entity X is authorized across all trails in domain Y." Cross-trail authorization requires manual, per-trail capability delegation.
 
-**Permission management is entangled with data lifecycle.** The same object stores records (which may need to persist for decades in compliance scenarios) and authorization rules (which change as organizations evolve). Deleting the trail deletes its governance. Migrating the trail means migrating governance too.
+**Permission lifecycle is entangled with data lifecycle.** The same object stores records (which may persist for decades in compliance) and authorization rules (which evolve as organizations change). Deleting or migrating the trail affects its governance.
 
-**It reinvents what hierarchies already solves.** Hierarchies exists precisely to manage "who is authorized to do what" through delegated trust. Yet the audit trail ignores hierarchies entirely and builds its own parallel authorization system.
+**It reinvents what hierarchies solves.** Hierarchies exists to manage delegated trust. Yet the audit trail ignores it, building a parallel authorization system.
 
-**It is not composable.** IOTA's strength is programmable transaction blocks (PTBs) that compose operations across packages. But the audit trail's authorization is closed — you cannot route authorization through an external system within a PTB.
+**5 of 17 permissions are self-governance.** `AddRoles`, `UpdateRoles`, `DeleteRoles`, `AddCapabilities`, `RevokeCapabilities` — these exist because the trail manages its own access control. If authorization is externalized, these meta-permissions disappear entirely. The trail's permission surface shrinks to the 12 permissions that describe actual domain operations.
 
 ### 3.2 The Analogy
 
-In the real world, a notary's authority to notarize does not come from the stamp — it comes from a state licensing body. A doctor's ability to prescribe medicine comes from their medical license, not from the prescription pad.
+A notary's authority to notarize comes from a state licensing body, not from the stamp. A physician's ability to prescribe comes from a medical license, not from the prescription pad.
 
-Currently, the audit trail is like a prescription pad that decides who can use it. It should instead be like a prescription pad that verifies you hold a valid medical license — issued by an authority external to the pad itself.
+The audit trail is currently a prescription pad that decides who can use it. It should be a prescription pad that verifies you hold a valid medical license — issued by an external authority.
 
-### 3.3 Why Notarization Gets It Right (For Its Scope)
+### 3.3 Notarization Gets It Right (For Its Scope)
 
-The base Notarization module uses Move's native object ownership. This is the correct choice for single-owner objects: the owner controls it, no custom authorization needed. It doesn't try to reinvent governance.
+The base Notarization module uses Move's native object ownership. This is correct for single-owner objects: no custom authorization needed. It doesn't reinvent governance.
 
-The audit trail can't use this approach because it's a shared object (multi-party access). But the solution isn't to embed a full governance system — it's to accept governance from external sources.
-
-### 3.4 The `tf_components` Capability Is the Right Token, But Issuance Is Too Restricted
-
-`tf_components::Capability` is already a good universal authorization token: scoped to a target, role-based, time-bounded, address-bindable. The problem is that only a `RoleMap` admin can issue Capabilities. There is no mechanism for an external authority (like hierarchies) to produce Capabilities or equivalent authorization proof independently.
+The audit trail can't use this approach because it's a shared object (multi-party access). But the answer isn't embedding governance — it's accepting governance from external sources.
 
 ---
 
 ## 4. Guiding Principles
 
-The proposed solution is guided by principles drawn from IOTA's network philosophy and general blockchain design hygiene:
-
 ### 4.1 Separation of Concerns
 
-Components should define **what operations are possible** (permission types) but not **who is authorized** (governance). Governance is a separate concern that should be pluggable.
+Components define **what operations exist** (permission types). They do not decide **who is authorized** — that is a governance concern delegated to external authority sources.
 
 ### 4.2 Composability via PTBs
 
-IOTA's programmable transaction blocks allow multiple package calls within a single atomic transaction. Authorization should work within this model: obtain authorization proof in one call, use it in the next, all within one PTB.
+IOTA's programmable transaction blocks compose multiple package calls in a single atomic transaction. Authorization should work within this model: obtain proof in one call, use it in the next.
 
 ### 4.3 Move-Native Idioms
 
-The solution should use established Move patterns — hot potatoes (types without `drop`), witness pattern, phantom types — rather than inventing novel mechanisms. The closest existing precedent is the **Kiosk TransferPolicy** pattern in IOTA/Sui.
+Use established Move patterns: **hot potatoes** (types without `drop` — must be consumed), **witness pattern**, **phantom types**. The closest precedent is IOTA's **Kiosk TransferPolicy** pattern.
 
 ### 4.4 Component Agnosticism
 
-The pattern must work for any component that needs authorization, not just audit trails. Identity, future data registries, credential stores — any shared object with protected operations should be able to use the same pattern.
+The pattern works for any shared object with protected operations: audit trails, identity credentials, future data registries. Not tied to any specific component.
 
 ### 4.5 Authority Source Agnosticism
 
-The pattern must work with any authority source: hierarchies federations today, direct RBAC for simple cases, Account Abstraction tomorrow, DAO governance in the future. No authority source should be privileged or hardcoded.
+The pattern works with any authority source: hierarchies today, Account Abstraction tomorrow, DAO governance in the future. No source is privileged.
 
-### 4.6 No New Concepts
+### 4.6 Respect Hierarchies' Original Intent
 
-The solution should not invent new authorization paradigms. It should apply existing blockchain patterns (specifically IOTA's TransferPolicy pattern) to the authorization domain.
+Hierarchies is a trust delegation framework for domain-level properties. It must not be repurposed as a raw operational permission store. The bridge translates **trust standing** (your role + property scope in a federation) into **operational access**, not the other way around.
+
+### 4.7 No Invented Concepts
+
+The solution applies the existing Kiosk TransferPolicy pattern to authorization. No new paradigms.
 
 ---
 
@@ -163,42 +182,38 @@ The solution should not invent new authorization paradigms. It should apply exis
 
 ### 5.1 Core Idea
 
-Define two hot-potato types in `tf_components` (the shared library):
+Two hot-potato types defined in `tf_components`:
 
-- **`ActionRequest<P>`** — created by a component before a protected operation. Declares what permission is needed. Has no `drop` ability — it MUST be consumed, enforcing that authorization cannot be skipped.
+- **`ActionRequest<phantom P>`** — created by a component before a protected operation. Declares what permission `P` is needed. Has no `drop` — **must be consumed**, enforcing that authorization cannot be skipped.
 
-- **`ActionApproval<P>`** — produced by an authority source after verifying authorization. Also no `drop` — it MUST be consumed by the component to complete the operation.
+- **`ActionApproval<phantom P>`** — produced by an authority source after verifying authorization. Also no `drop` — **must be consumed** by the component to complete the operation.
 
-The phantom type parameter `P` is the component's permission type (e.g., `audit_trail::permission::Permission`), ensuring type-safe matching between requests and approvals.
+The phantom type `P` is the component's permission type, ensuring type-safe matching.
 
-### 5.2 The Flow
-
-Within a single PTB:
+### 5.2 The Flow (Within a Single PTB)
 
 ```text
-1. Component.request_action()  →  ActionRequest<P>     (hot potato created)
-2. AuthorityAdapter.approve()  →  ActionApproval<P>     (hot potato created)
-3. Component.execute_action()  ←  consumes both          (hot potatoes destroyed)
+1. Component.request_action()  →  ActionRequest<P>     (hot potato: must be fulfilled)
+2. AuthorityAdapter.approve()  →  ActionApproval<P>     (hot potato: must be consumed)
+3. Component.execute_action()  ←  consumes both          (operation proceeds)
 ```
 
-If step 2 fails (unauthorized), the `ActionRequest` cannot be consumed, and the PTB aborts. Authorization cannot be bypassed.
+If step 2 fails (unauthorized), the `ActionRequest` cannot be consumed, and the entire PTB aborts. Authorization is structurally impossible to bypass.
 
 ### 5.3 Why Hot Potatoes
 
-The hot potato pattern (types without `drop` ability) is Move's native enforcement mechanism:
-
-- **Cannot be ignored**: If created, must be consumed. No way to "skip" authorization.
-- **Cannot be stored**: No `store` ability means approvals can't be saved and replayed — they're single-use within a transaction.
-- **Type-safe**: `ActionApproval<audit_trail::Permission>` cannot satisfy a request for `ActionApproval<identity::Permission>`.
-- **Verifiable**: The creation and consumption happen on-chain in a single transaction — fully auditable.
+- **Cannot be skipped**: Must be consumed. No way to ignore authorization.
+- **Cannot be replayed**: No `store` ability. Single-use within one transaction.
+- **Type-safe**: `ActionApproval<audit_trail::Permission>` cannot satisfy `ActionApproval<identity::Permission>`.
+- **Auditable**: Created and consumed on-chain in a single transaction.
 
 ### 5.4 Precedent: IOTA Kiosk TransferPolicy
 
-This pattern is not new. IOTA (inherited from Sui) uses exactly this for kiosk transfers:
+This is not a new pattern. IOTA (inherited from Sui) uses exactly this for kiosk item transfers:
 
 ```text
 Kiosk.list()        →  TransferRequest    (hot potato: "I want to transfer item X")
-Rule.check()        →  Receipt added       (rule verifies conditions)
+Rule.check()        →  adds Receipt        (rule satisfied)
 Policy.confirm()    ←  consumes request    (transfer completes)
 ```
 
@@ -206,9 +221,80 @@ The proposed pattern generalizes this from "transfer authorization" to "any oper
 
 ---
 
-## 6. Detailed Design
+## 6. Hierarchies as Authority Source — Respecting Original Intent
 
-### 6.1 Core Types (in `tf_components::authorization`)
+### 6.1 What Hierarchies IS and IS NOT
+
+**IS**: A trust delegation framework. It expresses *"Entity X is trusted by federation F to make claims about property P."* This is semantic, domain-level trust — a university trusted to issue degrees, a lab trusted to certify safety standards.
+
+**IS NOT**: A general-purpose permission database. It does not store "User X can click button Y." Properties like "degree_type", "ISO_certification", "medical_specialty" are domain concepts, not operational flags.
+
+### 6.2 The Natural Mapping: Trust Level + Property Scope
+
+The bridge does NOT create arbitrary mappings from properties to permissions. Instead, it recognizes that hierarchies already expresses two dimensions of authorization:
+
+**Dimension 1: Trust Level** — your role in the federation determines what TYPE of operations you can perform:
+
+| Federation Role | Operational Meaning | Example Component Operations |
+| --- | --- | --- |
+| Root Authority | Administrative control | Delete trail, migrate, configure locking |
+| Accreditor | Management within scope | Delete records, update metadata, manage locking windows |
+| Attester | Operational use within scope | Add records, correct records |
+
+**Dimension 2: Property Scope** — your accreditation properties determine WHICH component instances you can access:
+
+- Accredited for "degree_type" → can operate on the degree records audit trail
+- Accredited for "ISO_9001" → can operate on the quality certification audit trail
+- NOT accredited for "medical_license" → cannot touch the medical records trail
+
+This mapping is natural, not forced. It preserves hierarchies' intent:
+
+- The federation still manages trust over domain properties
+- Properties remain meaningful domain concepts, not operational flags
+- The bridge translates trust standing into operational access
+
+### 6.3 The ComponentLink Object
+
+A `ComponentLink` is a small shared object that connects a federation to a component instance:
+
+```move
+/// Connects a federation to a specific component instance.
+/// Defines which federation properties are relevant to this component
+/// and how federation trust levels map to component operations.
+public struct ComponentLink<phantom P: drop> has key, store {
+    id: UID,
+    /// The federation providing trust governance
+    federation_id: ID,
+    /// The component instance being governed
+    target_id: ID,
+    /// Which federation properties relate to this component.
+    /// An entity must be accredited for at least one of these
+    /// properties to access the component.
+    required_properties: vector<PropertyName>,
+    /// Permissions granted to entities with attester-level trust
+    attester_permissions: VecSet<P>,
+    /// Permissions granted to entities with accreditor-level trust
+    accreditor_permissions: VecSet<P>,
+    /// Permissions granted to root authorities
+    admin_permissions: VecSet<P>,
+}
+```
+
+This is created once per federation-component pairing. For example: *"Federation 'EuropeanUniversities' governs audit trail 'DegreeRecords'. Entities accredited for property 'degree_type' can access it. Attesters can add/correct records. Accreditors can also delete records and update metadata. Root authorities have full admin access."*
+
+### 6.4 Why This Preserves Hierarchies' Intent
+
+The federation doesn't know about audit trails or their operations. It continues to manage trust over domain properties exactly as designed.
+
+The `ComponentLink` is the bridge's configuration — it lives in the bridge package, not in hierarchies. Hierarchies is not modified. The bridge reads federation state (accreditation checks) and translates it.
+
+Properties are NOT repurposed as permission names. "degree_type" remains a domain property. The bridge uses the fact that an entity is accredited for "degree_type" to determine their trust level for the degree records trail — the same way a hospital uses the fact that a physician has a medical license to determine their access to patient records.
+
+---
+
+## 7. Detailed Design
+
+### 7.1 Core Types (in `tf_components::authorization`)
 
 ```move
 module tf_components::authorization;
@@ -220,7 +306,7 @@ use std::type_name::TypeName;
 public struct ActionRequest<phantom P: drop> {
     /// The shared object being acted upon
     target: ID,
-    /// The component-specific permission required
+    /// The component-specific permission required for this operation
     required_permission: P,
     /// The address requesting the action
     requester: address,
@@ -233,7 +319,7 @@ public struct ActionApproval<phantom P: drop> {
     target: ID,
     /// Must match the ActionRequest's required_permission
     approved_permission: P,
-    /// Identifies which authority source produced this approval
+    /// Identifies which authority source approved this
     authority: TypeName,
 }
 
@@ -253,37 +339,149 @@ public fun verify_and_consume<P: drop>(
     approval: ActionApproval<P>,
 ) {
     let ActionRequest { target, required_permission: _, requester: _ } = request;
-    let ActionApproval { target: approved_target, approved_permission: _, authority: _ } = approval;
+    let ActionApproval {
+        target: approved_target,
+        approved_permission: _,
+        authority: _,
+    } = approval;
     assert!(target == approved_target);
-    // Both hot potatoes are consumed (destructured).
-    // The operation may proceed.
+    // Both hot potatoes consumed (destructured). Operation may proceed.
 }
 
-/// Accessor: get the target from a request
-public fun request_target<P: drop>(request: &ActionRequest<P>): ID {
-    request.target
+/// Accessors for inspecting requests (used by authority adapters)
+public fun request_target<P: drop>(r: &ActionRequest<P>): ID { r.target }
+public fun request_permission<P: drop>(r: &ActionRequest<P>): &P { &r.required_permission }
+public fun request_requester<P: drop>(r: &ActionRequest<P>): address { r.requester }
+```
+
+### 7.2 Hierarchies Adapter (in bridge package)
+
+```move
+module access_controller_bridge::hierarchies_adapter;
+
+use hierarchies::main::{Self, Federation, AccreditCap};
+use hierarchies::property_name::PropertyName;
+use tf_components::authorization::{Self, ActionRequest, ActionApproval};
+use iota::vec_set::VecSet;
+use std::type_name;
+
+/// Connects a federation to a specific component instance.
+public struct ComponentLink<phantom P: drop> has key, store {
+    id: UID,
+    federation_id: ID,
+    target_id: ID,
+    required_properties: vector<PropertyName>,
+    attester_permissions: VecSet<P>,
+    accreditor_permissions: VecSet<P>,
+    admin_permissions: VecSet<P>,
 }
 
-/// Accessor: get the required permission from a request
-public fun request_permission<P: drop>(request: &ActionRequest<P>): &P {
-    &request.required_permission
-}
+/// Approve an action request based on the caller's trust standing
+/// in the linked federation.
+///
+/// The flow:
+/// 1. Verify the link matches the request's target
+/// 2. Determine the caller's trust level in the federation
+///    (root authority, accreditor, or attester)
+/// 3. Verify the caller's accreditation covers required properties
+/// 4. Check that the trust level grants the requested permission
+/// 5. Produce an ActionApproval
+public fun approve<P: drop + copy>(
+    federation: &Federation,
+    cap: &AccreditCap,
+    link: &ComponentLink<P>,
+    request: &ActionRequest<P>,
+    clock: &Clock,
+    ctx: &TxContext,
+): ActionApproval<P> {
+    let requester = authorization::request_requester(request);
+    let required_perm = authorization::request_permission(request);
+    let target = authorization::request_target(request);
 
-/// Accessor: get the requester address
-public fun request_requester<P: drop>(request: &ActionRequest<P>): address {
-    request.requester
+    // 1. Verify link matches
+    assert!(link.target_id == target);
+    assert!(link.federation_id == federation.federation_id());
+
+    // 2. Determine trust level and check permission
+    let requester_id = requester.to_id();
+
+    let authorized = if (federation.is_root_authority(&requester_id)) {
+        // Root authorities get admin-level permissions
+        link.admin_permissions.contains(required_perm)
+    } else if (federation.is_accreditor(&requester_id)) {
+        // Accreditors get accreditor-level permissions
+        // Also verify their property scope covers required properties
+        verify_property_scope(federation, &requester_id, &link.required_properties, clock);
+        link.accreditor_permissions.contains(required_perm)
+    } else if (federation.is_attester(&requester_id)) {
+        // Attesters get attester-level permissions
+        verify_property_scope_for_attester(
+            federation, &requester_id, &link.required_properties, clock,
+        );
+        link.attester_permissions.contains(required_perm)
+    } else {
+        false
+    };
+
+    assert!(authorized);
+
+    ActionApproval {
+        target,
+        approved_permission: *required_perm,
+        authority: type_name::get<ComponentLink<P>>(),
+    }
 }
 ```
 
-### 6.2 How a Component Uses It (Audit Trail Example)
+### 7.3 Audit Trail — Refactored (No Embedded RBAC)
+
+The `AuditTrail` struct loses its embedded `RoleMap`. The 5 self-governance permissions disappear:
 
 ```move
-module audit_trail::main;
+public struct AuditTrail<D: store + copy> has key, store {
+    id: UID,
+    creator: address,
+    created_at: u64,
+    sequence_number: u64,
+    records: LinkedTable<u64, Record<D>>,
+    locking_config: LockingConfig,
+    immutable_metadata: Option<ImmutableMetadata>,
+    updatable_metadata: Option<String>,
+    version: u64,
+    // NO roles: RoleMap<Permission, RecordTags>
+}
+```
 
-use tf_components::authorization::{Self, ActionRequest, ActionApproval};
+The `Permission` enum simplifies to actual domain operations:
 
+```move
+public enum Permission has copy, drop, store {
+    // Data operations (attester level)
+    AddRecord,
+    CorrectRecord,
+    // Data management (accreditor level)
+    DeleteRecord,
+    DeleteAllRecords,
+    UpdateMetadata,
+    DeleteMetadata,
+    // Configuration (accreditor level)
+    UpdateLockingConfig,
+    UpdateLockingConfigForDeleteRecord,
+    UpdateLockingConfigForDeleteTrail,
+    UpdateLockingConfigForWrite,
+    // Lifecycle (admin level)
+    DeleteAuditTrail,
+    Migrate,
+    // REMOVED: AddRoles, UpdateRoles, DeleteRoles,
+    //          AddCapabilities, RevokeCapabilities
+    // These were self-governance — no longer needed.
+}
+```
+
+Protected functions use the authorization receipt pattern:
+
+```move
 /// Create an authorization request for adding a record.
-/// Returns a hot potato that must be fulfilled by an authority source.
 public fun request_add_record<D: store + copy>(
     trail: &AuditTrail<D>,
     ctx: &TxContext,
@@ -295,9 +493,8 @@ public fun request_add_record<D: store + copy>(
     )
 }
 
-/// Add a record with externally-provided authorization.
-/// Consumes both the request and approval hot potatoes.
-public fun add_record_authorized<D: store + copy>(
+/// Add a record with external authorization.
+public fun add_record<D: store + copy>(
     trail: &mut AuditTrail<D>,
     request: ActionRequest<Permission>,
     approval: ActionApproval<Permission>,
@@ -309,10 +506,10 @@ public fun add_record_authorized<D: store + copy>(
     assert!(trail.version == PACKAGE_VERSION, EPackageVersionMismatch);
     assert!(!locking::is_write_locked(&trail.locking_config, clock), ETrailWriteLocked);
 
-    // Verify authorization and consume hot potatoes
+    // Verify and consume authorization
     authorization::verify_and_consume(request, approval);
 
-    // Pure data operation — no embedded RBAC check
+    // Pure data operation
     let caller = ctx.sender();
     let timestamp = clock::timestamp_ms(clock);
     let trail_id = trail.id();
@@ -339,357 +536,530 @@ public fun add_record_authorized<D: store + copy>(
 }
 ```
 
-### 6.3 How an Authority Source Produces Approvals
+### 7.4 End-to-End Example: Full PTB
 
-Each authority source provides an adapter module:
+A university registrar (attester in federation "EuropeanUniversities") adds a degree record to the "DegreeRecords" audit trail:
 
 ```move
-module hierarchies_bridge::adapter;
+// === Single Programmable Transaction Block ===
 
-use hierarchies::main::{Federation, AccreditCap};
-use hierarchies::property_name::PropertyName;
-use tf_components::authorization::{Self, ActionRequest, ActionApproval};
-use std::type_name;
+// Step 1: Audit trail creates the request (hot potato)
+let request = audit_trail::request_add_record(&trail, ctx);
 
-/// Shared object mapping federation properties to component permissions.
-/// Created once per federation-component pairing.
-/// Example: "entities accredited for property 'RecordWriter' in federation F
-///           are authorized for Permission::AddRecord on trail T"
-public struct PermissionMapping<phantom P: drop> has key, store {
-    id: UID,
-    federation_id: ID,
-    target_id: ID,
-    mappings: VecMap<PropertyName, P>,
-}
+// Step 2: Hierarchies adapter verifies trust standing and approves
+let approval = hierarchies_adapter::approve(
+    &federation,        // EuropeanUniversities federation
+    &accredit_cap,      // registrar's AccreditCap
+    &component_link,    // links this federation to this trail
+    &request,           // borrows the request to inspect it
+    clock,
+    ctx,
+);
 
-/// Approve an action request based on hierarchies accreditation.
-///
-/// Checks that the requester has a valid accreditation in the federation
-/// for a property that maps to the requested permission.
-public fun approve<P: drop + copy>(
-    federation: &Federation,
-    cap: &AccreditCap,
-    mapping: &PermissionMapping<P>,
-    request: &ActionRequest<P>,
-    clock: &Clock,
-    ctx: &TxContext,
-): ActionApproval<P> {
-    // 1. Verify the mapping matches the request's target
-    assert!(mapping.target_id == authorization::request_target(request));
-    assert!(mapping.federation_id == federation.federation_id());
-
-    // 2. Find which property maps to the required permission
-    //    and verify the requester has accreditation for it
-    let required_permission = authorization::request_permission(request);
-    // ... verify accreditation covers the required permission ...
-
-    // 3. Produce approval
-    ActionApproval {
-        target: authorization::request_target(request),
-        approved_permission: *required_permission,
-        authority: type_name::get<PermissionMapping<P>>(),
-    }
-}
+// Step 3: Audit trail consumes both and adds the record
+audit_trail::add_record(
+    &mut trail,
+    request,            // consumed (hot potato)
+    approval,           // consumed (hot potato)
+    degree_data,
+    some(b"PhD in Computer Science"),
+    clock,
+    ctx,
+);
 ```
 
 ---
 
-## 7. Authority Source Adapters
+## 8. Impact on the Audit Trail
 
-The pattern's power comes from supporting multiple authority sources through thin adapter modules. Each adapter translates its authority model into the universal `ActionApproval`.
+### 8.1 What Is Removed
 
-### 7.1 Hierarchies Adapter
+- The `roles: RoleMap<Permission, RecordTags>` field is removed from `AuditTrail`
+- The 5 self-governance permissions (`AddRoles`, `UpdateRoles`, `DeleteRoles`, `AddCapabilities`, `RevokeCapabilities`) are removed from the `Permission` enum
+- All role/capability administration functions are removed (`create_role`, `update_role_permissions`, `delete_role`, `new_capability`, `revoke_capability`, `destroy_capability`, `destroy_initial_admin_capability`, `revoke_initial_admin_capability`)
+- The `create()` function no longer returns a `Capability` — there are no embedded capabilities
 
-**Input**: Federation accreditation (property-based)
-**Logic**: "If the requester is accredited for property X in federation F, and property X maps to permission P for target T, approve."
-**Use case**: Organizational trust delegation — a federation root authority controls who can write to which audit trails.
+### 8.2 What Changes
 
-### 7.2 RBAC Adapter (Backward Compatibility)
+- Every protected function gains `request` and `approval` parameters instead of `cap: &Capability`
+- Each protected function has a corresponding `request_*` function that creates the `ActionRequest`
+- The `create()` function takes simpler arguments (no role initialization)
 
-**Input**: `tf_components::Capability` + `RoleMap`
-**Logic**: "If the presented Capability is valid in the RoleMap and carries the required permission, approve."
-**Use case**: Simple, self-contained authorization for components that don't need external governance. Provides backward compatibility during migration.
+### 8.3 What Stays the Same
 
-```move
-module rbac_bridge::adapter;
+- `AuditTrail` remains a shared object
+- All data operations (add/delete/correct records) work identically
+- Locking logic is unchanged (time-based, count-based, trail-level locks)
+- Events are unchanged
+- Record structure is unchanged
+- All query functions are unchanged
 
-use tf_components::capability::Capability;
-use tf_components::role_map::RoleMap;
-use tf_components::authorization::{Self, ActionRequest, ActionApproval};
+### 8.4 Net Effect
 
-/// Approve based on existing RBAC Capability.
-/// This adapter allows the current Capability-based system to produce
-/// ActionApprovals, enabling gradual migration.
-public fun approve<P: drop + copy, D: store>(
-    role_map: &RoleMap<P, D>,
-    cap: &Capability,
-    request: &ActionRequest<P>,
-    clock: &Clock,
-    ctx: &TxContext,
-): ActionApproval<P> {
-    let required_permission = authorization::request_permission(request);
-    role_map.assert_capability_valid(cap, required_permission, clock, ctx);
-
-    ActionApproval {
-        target: authorization::request_target(request),
-        approved_permission: *required_permission,
-        authority: type_name::get<RoleMap<P, D>>(),
-    }
-}
-```
-
-### 7.3 Account Abstraction Adapter (Future)
-
-**Input**: `AuthContext` from AA framework
-**Logic**: "If the AI Account's authenticator has already validated the transaction with claims that cover the required permission, approve."
-**Use case**: Programmable authentication — the account itself encodes authorization rules (multisig, spending limits, time-locks, DAO governance).
-
-```move
-module aa_bridge::adapter;
-
-/// Approve based on Account Abstraction authentication context.
-/// The AI Account's AuthenticatorFunction has already validated
-/// the transaction; this adapter extracts authorization claims.
-public fun approve<P: drop + copy>(
-    auth_context: &AuthContext,
-    request: &ActionRequest<P>,
-): ActionApproval<P> {
-    // Extract authorization claims from the authenticated context
-    // Verify they cover the required permission
-    // ...
-}
-```
-
-### 7.4 Composite Adapter (Multi-Authority)
-
-For scenarios requiring authorization from multiple sources (e.g., both hierarchies accreditation AND a time-based condition):
-
-```move
-/// Require approvals from multiple authority sources.
-/// Uses a collector pattern within a single PTB.
-public fun begin_composite(request: &ActionRequest<P>): CompositeCollector<P> { ... }
-public fun add_approval(collector: &mut CompositeCollector<P>, approval: ActionApproval<P>) { ... }
-public fun finalize(collector: CompositeCollector<P>): ActionApproval<P> { ... }
-```
-
----
-
-## 8. Impact on Existing Components
-
-### 8.1 Audit Trail
-
-**What changes**: The `roles: RoleMap<Permission, RecordTags>` field is decoupled from the `AuditTrail` struct. Protected functions gain `_authorized` variants that accept `ActionRequest`/`ActionApproval` instead of checking the embedded RoleMap.
-
-**Backward compatibility**: The existing `add_record(trail, cap, ...)` API can be preserved as a convenience wrapper that internally creates a request, approves it via the RBAC adapter, and executes — maintaining full backward compatibility while the ecosystem migrates.
-
-**What the trail becomes**: A pure data structure with locking constraints. Authorization is fully external.
-
-### 8.2 Hierarchies
-
-**What changes**: Minimal. Hierarchies gains an adapter module (`hierarchies_bridge::adapter`) that translates federation accreditations into `ActionApproval` objects. The core hierarchies package remains unchanged.
-
-**New artifact**: `PermissionMapping<P>` shared objects that define how federation properties map to component permissions. These are created and managed by federation root authorities.
-
-### 8.3 Notarization (Base)
-
-**No change needed.** Notarization objects are owned, not shared. Move's native object ownership is the correct and sufficient authorization model. The ActionRequest/Approval pattern is for shared objects with multi-party access.
-
-### 8.4 tf_components (Product-Core)
-
-**What changes**: A new `authorization` module is added containing `ActionRequest`, `ActionApproval`, and the `verify_and_consume` function. The existing `Capability` and `RoleMap` modules remain unchanged — the RBAC adapter bridges them into the new pattern.
+The audit trail becomes a **pure data component** — it stores records, enforces locking constraints, and emits events. It no longer manages access control. The trail surface area shrinks, its responsibilities are clearer, and it becomes composable with any authority source.
 
 ---
 
 ## 9. Account Abstraction Considerations
 
-The upcoming Account Abstraction (IIP discussion #35) introduces AI Accounts with programmable authentication via `AuthenticatorFunction`. This changes the landscape:
-
 ### 9.1 Authentication vs. Authorization
 
-AA addresses **authentication** — "is this transaction from who it claims to be from?" It replaces cryptographic signature verification with custom Move logic.
+Account Abstraction (AA, per [IIP #35](https://github.com/iotaledger/IIPs/discussions/35)) introduces AI Accounts with programmable authentication — custom Move functions replace cryptographic signature verification.
 
-The ActionRequest/Approval pattern addresses **authorization** — "is this authenticated entity allowed to perform this specific operation?" These are orthogonal concerns:
+AA addresses **authentication**: *"Is this transaction genuinely from who it claims?"* \
+The ActionRequest/Approval pattern addresses **authorization**: *"Is this authenticated entity allowed to perform this operation?"*
 
 ```text
-AA (AuthenticatorFunction)    →  "This is genuinely Alice"
-ActionRequest/Approval        →  "Alice is allowed to add records to trail X"
+AA (AuthenticatorFunction)    →  "This IS Alice"
+ActionRequest/Approval        →  "Alice MAY add records to trail X"
 ```
 
-### 9.2 How AA Complements the Pattern
+These are orthogonal. AA doesn't replace the pattern — it complements it.
 
-With AA, an AI Account's authenticator can embed authorization checks:
+### 9.2 AA as an Authority Source
 
-- **Multi-factor**: Require both a signature AND a hierarchies accreditation check
-- **Delegated signing**: An employee's AI Account authenticates via the company's federation
-- **Spending limits / scoped access**: The authenticator restricts which operations the account can perform
-
-The AA adapter translates these authenticated claims into `ActionApproval` objects, making AA just another authority source in the universal pattern.
-
-### 9.3 New Patterns AA Enables
-
-- **Implicit authorization**: Instead of explicitly routing through hierarchies in the PTB, the AI Account's authenticator checks federation accreditation as part of authentication. The PTB becomes simpler.
-- **Account-level policies**: Authorization rules live in the account definition rather than in external mapping objects, reducing on-chain state.
-- **Recovery and rotation**: Authority delegation survives key rotation because it's tied to the account (a persistent object with stable address), not to a specific key.
-
----
-
-## 10. Migration Path
-
-### Phase 1: Define Core Types
-
-Add `tf_components::authorization` module with `ActionRequest`, `ActionApproval`, `new_request`, `verify_and_consume`. This is a purely additive change with no impact on existing code.
-
-### Phase 2: RBAC Adapter
-
-Create the RBAC adapter that bridges existing `Capability` + `RoleMap` into the new pattern. This proves the pattern works with the existing authorization model and provides backward compatibility.
-
-### Phase 3: Dual API on Audit Trail
-
-Add `_authorized` variants of protected functions alongside existing ones. The existing functions become wrappers:
+An AA adapter would translate authenticated context into `ActionApproval`:
 
 ```move
-// New: explicit external authorization
-public fun add_record_authorized(trail, request, approval, data, ...) { ... }
+module aa_bridge::adapter;
 
-// Existing: backward-compatible, delegates to RBAC adapter internally
-public fun add_record(trail, cap, data, ...) {
-    let request = request_add_record(trail, ctx);
-    let approval = rbac_adapter::approve(&trail.roles, cap, &request, clock, ctx);
-    add_record_authorized(trail, request, approval, data, ...);
+/// The AI Account's authenticator has validated the transaction.
+/// Extract authorization claims from the authentication context.
+public fun approve<P: drop + copy>(
+    auth_context: &AuthContext,
+    request: &ActionRequest<P>,
+): ActionApproval<P> {
+    // The authenticator function has already verified authorization
+    // (e.g., checked a hierarchies federation, validated a multisig,
+    // enforced spending limits) as part of authentication.
+    // This adapter extracts the result.
 }
 ```
 
-### Phase 4: Hierarchies Adapter
+### 9.3 Patterns AA Enables
 
-Create the hierarchies adapter with `PermissionMapping` objects. Federation root authorities can now map accreditations to audit trail permissions. This is the core "bridge" deliverable.
+- **Implicit authorization**: The AI Account's authenticator checks federation accreditation as part of authentication. The PTB becomes simpler — no explicit adapter call needed.
+- **Account-level policies**: Authorization rules live in the account definition, reducing on-chain configuration objects.
+- **Key rotation resilience**: Trust is tied to the account (persistent object with stable address), not to a specific key.
 
-### Phase 5: Decouple RoleMap from AuditTrail
+### 9.4 Why the Pattern Is AA-Ready
 
-Move `roles: RoleMap` out of the `AuditTrail` struct into a standalone shared object. The RBAC adapter references this external object. The audit trail becomes a pure data container.
+The ActionRequest/Approval protocol doesn't care HOW the approval is produced. AA is just another adapter. When AA ships, existing components and existing `ComponentLink` objects continue to work — you simply swap the adapter used in the PTB.
 
-This is the most disruptive change and should be done when the ecosystem is ready. It can be deferred or skipped if backward compatibility constraints require keeping the embedded RoleMap.
+---
 
-### Phase 6: AA Integration
+## 10. Incremental Delivery
 
-When Account Abstraction ships, create the AA adapter. AI Accounts can then authorize component operations through their custom authenticators.
+Each increment is independently valuable and deployable.
+
+### Increment 1: Authorization Types in `tf_components`
+
+**Delivers**: `ActionRequest<P>`, `ActionApproval<P>`, `new_request()`, `verify_and_consume()` in a new `tf_components::authorization` module.
+
+**Why standalone**: These types have no dependencies on hierarchies, audit trails, or any other component. They are pure primitives. Other increments build on them.
+
+**Effort**: Small. One new module, ~50 lines of Move.
+
+### Increment 2: Refactor Audit Trail to External Authorization
+
+**Delivers**: Audit trail with embedded RoleMap removed. All protected functions accept `ActionRequest`/`ActionApproval`. Permission enum simplified (5 self-governance permissions removed).
+
+**Why standalone**: Even without the hierarchies adapter, the audit trail is now composable. Any package can produce `ActionApproval<Permission>` objects. Simple test adapters can be written for development.
+
+**Consideration**: This is the largest change. The audit trail is in active development, making this the right time.
+
+### Increment 3: Hierarchies Adapter (The Bridge Proper)
+
+**Delivers**: `ComponentLink<P>` struct, `approve()` function, and helper functions for creating/managing component links. This IS the access controller bridge.
+
+**Why standalone**: Hierarchies package is not modified — the adapter is a new package that reads federation state. Components that have adopted Increment 2 immediately gain hierarchies-based authorization.
+
+### Increment 4: AA Adapter (When AA Ships)
+
+**Delivers**: Adapter translating AA `AuthContext` into `ActionApproval`. Components gain AA-based authorization with no further changes.
 
 ---
 
 ## 11. Trade-offs and Alternatives Considered
 
-### 11.1 Alternative: Hierarchies Issues Capabilities Directly
+### 11.1 Rejected: Hierarchies Issues Capabilities for Audit Trail RoleMaps
 
-**Idea**: Instead of a new pattern, have hierarchies issue `tf_components::Capability` objects for audit trail RoleMaps.
+**Idea**: Keep embedded RoleMap. Have hierarchies issue `tf_components::Capability` objects for each trail's RoleMap.
 
-**Why rejected**: This makes hierarchies an admin of each trail's embedded RoleMap — it doesn't change the architecture, just adds a delegation path. The audit trail is still its own governance silo. Cross-component authorization still requires per-trail setup. And it couples hierarchies to the specific RoleMap implementation.
+**Why rejected**: Doesn't fix the architecture. The trail is still its own governance silo. Each trail still needs per-trail capability setup. Hierarchies becomes an admin of the trail's embedded RBAC rather than a sovereign authority source. And it couples hierarchies to the specific RoleMap implementation.
 
-### 11.2 Alternative: Generic Authorization Policy Object
+### 11.2 Rejected: Generic Authorization Policy Object With Runtime Dispatch
 
 **Idea**: A `Policy<P>` shared object that dispatches to different authorization backends at runtime.
 
-**Why rejected**: Move doesn't have dynamic dispatch or trait objects. A generic policy would require enumerating all possible backends at compile time, which isn't extensible. The hot potato pattern achieves the same goal through composition rather than dispatch.
+**Why rejected**: Move doesn't have dynamic dispatch or trait objects. Would require enumerating all backends at compile time. The hot potato pattern achieves the same goal through composition in PTBs — more aligned with Move's design.
 
-### 11.3 Alternative: Keep Embedded RBAC, Add Hierarchies as Another Admin
+### 11.3 Rejected: Map Individual Properties to Individual Permissions
 
-**Idea**: Don't change the architecture. Just give hierarchies a way to manage the audit trail's embedded RoleMap.
+**Idea**: An earlier version of this proposal mapped federation properties (e.g., "record_writer") directly to audit trail permissions (e.g., `AddRecord`).
 
-**Why rejected**: This is the least disruptive but doesn't solve the fundamental problem. Every component still embeds its own governance. Cross-component policies still require per-component setup. The pattern doesn't generalize to future components or authority sources.
+**Why rejected**: This misuses hierarchies. It requires inventing artificial properties that are really operational flags. Properties should remain domain concepts ("degree_type", "ISO_certification"). The correct abstraction is the two-dimensional mapping: trust level (root/accreditor/attester) determines operation category, property scope determines which component instances.
 
 ### 11.4 Trade-off: PTB Complexity
 
-The proposed pattern requires more steps in a PTB: create request, route to authority, consume approval. The current pattern is simpler: call function with Capability.
+The pattern requires three steps per operation in a PTB (request → approve → execute) versus one step today (call with Capability).
 
-**Mitigation**: Convenience wrappers (Phase 3) hide this complexity for common cases. SDK-level helpers can compose the PTB steps. The added explicitness is a feature in security-sensitive contexts — authorization flow is visible and auditable.
+**Why acceptable**: The explicit flow is a *feature* in security-sensitive contexts — authorization is visible and auditable. SDK helpers and client libraries can compose the PTB steps, hiding complexity from end users. The on-chain semantics are clearer than implicit Capability checking.
 
-### 11.5 Trade-off: Additional On-Chain Objects
+### 11.5 Trade-off: ComponentLink Configuration Objects
 
-`PermissionMapping` objects add on-chain state. Each federation-component pairing needs a mapping.
+Each federation-component pairing needs a `ComponentLink` shared object.
 
-**Mitigation**: These are small, infrequently modified objects. The storage cost is negligible compared to the records stored in audit trails. They can be frozen (made immutable) once established to avoid future transaction costs.
-
-### 11.6 Trade-off: Breaking Change vs. Backward Compatibility
-
-The full vision (Phase 5: decoupling RoleMap) is a breaking change for the audit trail.
-
-**Mitigation**: The phased approach allows incremental adoption. The RBAC adapter ensures existing Capability-based workflows continue to work. Components can opt into external authorization at their own pace.
+**Why acceptable**: These are small, infrequently modified objects. Created once when establishing a governance relationship. Storage cost is negligible. They can be made immutable once established.
 
 ---
 
 ## 12. Conclusion
 
-The current IOTA Trust Framework components each solve authorization independently, resulting in disconnected governance silos. The audit trail embeds a full RBAC system that cannot communicate with hierarchies — the very component designed to manage delegated authority.
+The IOTA Trust Framework's components currently solve authorization in isolation. The audit trail embeds a full RBAC system, creating per-instance governance silos disconnected from hierarchies — the very component designed to manage delegated trust.
 
-The proposed solution applies IOTA's existing **TransferPolicy pattern** (authorization receipts via hot potatoes) to the general authorization domain:
+The root cause is a violation of separation of concerns: components simultaneously manage data AND decide who can access it. The resource and the governor are the same object.
 
-1. **Components** define what operations exist (permission types) and create `ActionRequest` hot potatoes for protected operations.
-2. **Authority sources** (hierarchies, RBAC, Account Abstraction, future systems) verify authorization and produce `ActionApproval` hot potatoes.
+The proposed solution applies IOTA's existing **TransferPolicy pattern** to authorization:
+
+1. **Components** define what operations exist and create `ActionRequest` hot potatoes for protected operations.
+2. **Authority sources** verify trust and produce `ActionApproval` hot potatoes.
 3. **Components** consume both to execute the operation.
 
-This pattern is:
+For **hierarchies specifically**, the bridge respects its original intent as a trust delegation framework:
 
-- **Not a new invention** — it is the established Kiosk TransferPolicy pattern generalized to any authorization domain.
-- **Move-native** — hot potatoes, phantom types, PTB composability.
-- **Component-agnostic** — any shared object can use it.
-- **Authority-agnostic** — any authorization system can produce approvals.
-- **Future-proof** — Account Abstraction becomes just another authority source adapter.
+- Federation trust levels (root authority / accreditor / attester) naturally map to operation categories (admin / management / write)
+- Federation property scope determines which component instances an entity can access
+- Properties remain domain concepts — not repurposed as operational flags
+- Hierarchies is read, not modified — the adapter is a separate package
 
-The bridge is not a single module or package. **The bridge is the protocol** — the `ActionRequest<P>` and `ActionApproval<P>` types that flow between components and authority sources within a PTB. Adapters are thin translation layers. The pattern connects any component to any authority source, now and in the future.
+The result:
+
+- **Audit trails** become pure data components — records, locking, events. No embedded governance.
+- **Hierarchies** remains a trust delegation framework. Its authority now extends naturally to operational components.
+- **Future components** adopt the same pattern. Any new shared object with protected operations uses `ActionRequest`/`ActionApproval`.
+- **Future authority sources** (Account Abstraction, DAO governance) become adapters that produce `ActionApproval`. No component changes needed.
+
+The bridge is not a module. **The bridge is a protocol** — `ActionRequest<P>` and `ActionApproval<P>` flowing between components and authority sources within a PTB. Adapters translate; components verify; hot potatoes enforce.
 
 ---
 
-## Appendix A: Visual Architecture
+## Appendix A: Architecture Diagram
 
 ```text
-                    ┌─────────────────────────────────────┐
-                    │    tf_components::authorization       │
-                    │                                       │
-                    │   ActionRequest<P>   ActionApproval<P>│
-                    │   (the universal protocol)            │
-                    └──────────────┬────────────────────────┘
-                                   │
-                ┌──────────────────┼──────────────────────┐
-                │                  │                      │
-       ┌────────▼────────┐  ┌─────▼────────────┐  ┌──────▼───────────┐
-       │   Hierarchies    │  │   RBAC (legacy)   │  │   AA Accounts    │
-       │   Adapter        │  │   Adapter          │  │   Adapter        │
-       │                  │  │                    │  │   (future)       │
-       │   Federation     │  │   RoleMap +        │  │   AuthContext →  │
-       │   Accreditation  │  │   Capability →     │  │   Approval       │
-       │   → Approval     │  │   Approval         │  │                  │
-       └─────────────────┘  └────────────────────┘  └──────────────────┘
-                │                  │                      │
-                └──────────────────┼──────────────────────┘
-                                   │
-                ┌──────────────────┼──────────────────────┐
-                │                  │                      │
-       ┌────────▼────────┐  ┌─────▼────────────┐  ┌──────▼───────────┐
-       │   Audit Trail    │  │   Identity        │  │   Future          │
-       │   (records)      │  │   (credentials)   │  │   Component X     │
-       │                  │  │                    │  │                   │
-       │   ActionRequest  │  │   ActionRequest    │  │   ActionRequest   │
-       │   <Permission>   │  │   <IdPermission>   │  │   <XPermission>   │
-       └─────────────────┘  └────────────────────┘  └───────────────────┘
+                    ┌──────────────────────────────────────────┐
+                    │       tf_components::authorization         │
+                    │                                            │
+                    │   ActionRequest<P>     ActionApproval<P>   │
+                    │   (the universal protocol)                 │
+                    └─────────────────────┬────────────────────-─┘
+                                          │
+               ┌──────────────────────────┼────────────────────────────┐
+               │                          │                            │
+      ┌────────▼─────────┐     ┌──────────▼──────────┐     ┌──────────▼──────────┐
+      │   Hierarchies     │     │                     │     │   Account            │
+      │   Adapter         │     │   Custom Adapter    │     │   Abstraction        │
+      │                   │     │   (any source)      │     │   Adapter (future)   │
+      │   Federation +    │     │                     │     │                      │
+      │   ComponentLink   │     │   Your logic →      │     │   AuthContext →       │
+      │   → Approval      │     │   Approval          │     │   Approval           │
+      └──────────────────┘     └─────────────────────┘     └──────────────────────┘
+               │                          │                            │
+               └──────────────────────────┼────────────────────────────┘
+                                          │
+               ┌──────────────────────────┼────────────────────────────┐
+               │                          │                            │
+      ┌────────▼─────────┐     ┌──────────▼──────────┐     ┌──────────▼──────────┐
+      │   Audit Trail     │     │   Identity          │     │   Future             │
+      │   (records)       │     │   (credentials)     │     │   Component X        │
+      │                   │     │                     │     │                      │
+      │   ActionRequest   │     │   ActionRequest     │     │   ActionRequest      │
+      │   <Permission>    │     │   <IdPermission>    │     │   <XPermission>      │
+      └──────────────────┘     └─────────────────────┘     └──────────────────────┘
 ```
 
-## Appendix B: Comparison Table
+## Appendix B: Trust Level Mapping — Concrete Example
 
-| Aspect | Current State | Proposed State |
-| --- | --- | --- |
-| Authorization location | Embedded in each component | External, pluggable authority sources |
-| Permission definition | Component-specific | Component-specific (unchanged) |
-| Permission granting | Component's embedded RoleMap only | Any adapter: Hierarchies, RBAC, AA |
-| Cross-component authorization | Impossible | Natural (same federation governs multiple components) |
-| Pattern | Custom per component | Universal ActionRequest/Approval protocol |
-| Move idiom | Capability checked internally | Hot potato consumed in PTB |
-| Existing precedent | None (ad hoc) | Kiosk TransferPolicy pattern |
-| Account Abstraction readiness | Not considered | First-class adapter slot |
+**Scenario**: Federation "EuropeanUniversities" governs audit trail "DegreeRecords"
 
-## Appendix C: Referenced Materials
+```text
+Federation Property:  "degree_type" (values: "PhD", "Masters", "Bachelors")
 
+ComponentLink configuration:
+  required_properties: ["degree_type"]
+  attester_permissions:    {AddRecord, CorrectRecord}
+  accreditor_permissions:  {AddRecord, CorrectRecord, DeleteRecord, UpdateMetadata}
+  admin_permissions:       {all 12 permissions}
+
+Result:
+  ┌─────────────────────────┬───────────────────────────────────────────┐
+  │ Entity                  │ What they can do                          │
+  ├─────────────────────────┼───────────────────────────────────────────┤
+  │ Ministry of Education   │ Full admin (root authority)               │
+  │ (Root Authority)        │ Delete trail, migrate, configure locking  │
+  ├─────────────────────────┼───────────────────────────────────────────┤
+  │ University Consortium   │ Management (accreditor for degree_type)   │
+  │ (Accreditor)            │ Add/correct/delete records, update metadata│
+  ├─────────────────────────┼───────────────────────────────────────────┤
+  │ Individual University   │ Write access (attester for degree_type)   │
+  │ (Attester)              │ Add and correct degree records            │
+  ├─────────────────────────┼───────────────────────────────────────────┤
+  │ Random entity with no   │ Nothing. No accreditation = no access.    │
+  │ federation standing     │ Request created, approval denied, PTB     │
+  │                         │ aborts.                                   │
+  └─────────────────────────┴───────────────────────────────────────────┘
+```
+
+## Appendix C: Flow Diagrams
+
+### C.1 Current State — Audit Trail With Embedded RBAC (Before)
+
+How authorization works today. The trail is both resource and governor.
+
+```mermaid
+sequenceDiagram
+    participant Admin as Trail Admin
+    participant Trail as AuditTrail<br/>(shared object)
+    participant RoleMap as Embedded RoleMap<br/>(inside trail)
+
+    Note over Trail,RoleMap: Trail creation — governance bootstrapped inside the resource
+    Admin->>Trail: create()
+    Trail->>RoleMap: Initialize admin role + permissions
+    RoleMap-->>Trail: RoleMap embedded in trail
+    Trail-->>Admin: Capability (Admin role)
+
+    Note over Admin,RoleMap: Granting access — trail manages its own governance
+    Admin->>Trail: new_capability(cap, "Writer" role, user_address)
+    Trail->>RoleMap: Validate admin cap, issue new cap
+    RoleMap-->>Trail: New Capability created
+    Trail-->>Admin: Capability transferred to user
+
+    Note over Admin,RoleMap: Writing a record — trail checks its own RoleMap
+    participant User as User (Writer)
+    User->>Trail: add_record(cap, data)
+    Trail->>RoleMap: assert_capability_valid(cap, AddRecord)
+    RoleMap-->>Trail: Valid
+    Trail->>Trail: Insert record into LinkedTable
+    Trail-->>User: RecordAdded event
+```
+
+**Problem**: The `Federation` and its trust hierarchy are completely absent. The trail creates its own isolated governance. No connection to domain-level trust.
+
+### C.2 Proposed State — Setup Phase (One-Time Configuration)
+
+A federation root authority creates the `ComponentLink` that connects a federation to a component instance.
+
+```mermaid
+sequenceDiagram
+    participant RA as Root Authority<br/>(Ministry of Education)
+    participant Fed as Federation<br/>"EuropeanUniversities"
+    participant Bridge as Bridge Package
+    participant Trail as AuditTrail<br/>"DegreeRecords"
+
+    Note over RA,Trail: One-time setup: connect federation governance to component
+
+    RA->>Fed: add_property("degree_type", allowed: PhD/Masters/Bachelors)
+    Fed-->>RA: Property registered
+
+    RA->>Fed: create_accreditation_to_attest(university_id, ["degree_type"])
+    Fed-->>RA: University accredited as attester
+
+    RA->>Bridge: create_component_link(<br/>  federation_id,<br/>  trail_id,<br/>  required_properties: ["degree_type"],<br/>  attester_permissions: {AddRecord, CorrectRecord},<br/>  accreditor_permissions: {AddRecord, ..., DeleteRecord, UpdateMetadata},<br/>  admin_permissions: {all 12}<br/>)
+    Bridge-->>RA: ComponentLink<Permission> created (shared object)
+
+    Note over Bridge,Trail: The trail itself is NOT modified.<br/>It has no embedded RoleMap.<br/>The ComponentLink is the bridge configuration.
+```
+
+**Assets created**:
+
+- `ComponentLink<Permission>` — shared object, the bridge configuration
+- `AccreditCap` — transferred to accredited entities
+- Federation properties — registered in the federation
+
+### C.3 Proposed State — Authorized Operation (Attester Adds a Record)
+
+The core authorization receipt flow within a single PTB.
+
+```mermaid
+sequenceDiagram
+    participant Uni as University Registrar<br/>(Attester)
+    participant Trail as AuditTrail<br/>"DegreeRecords"
+    participant Adapter as Hierarchies Adapter<br/>(bridge package)
+    participant Fed as Federation<br/>"EuropeanUniversities"
+    participant Link as ComponentLink<br/>(bridge config)
+
+    Note over Uni,Link: Single Programmable Transaction Block (PTB)
+
+    Uni->>Trail: request_add_record(&trail, ctx)
+    Trail-->>Uni: ActionRequest<Permission><br/>{ target: trail_id,<br/>  permission: AddRecord,<br/>  requester: uni_address }
+    Note right of Trail: Hot potato created.<br/>MUST be consumed<br/>or PTB aborts.
+
+    Uni->>Adapter: approve(<br/>  &federation,<br/>  &accredit_cap,<br/>  &component_link,<br/>  &request,<br/>  clock, ctx)
+    Adapter->>Fed: is_attester(uni_id)?
+    Fed-->>Adapter: Yes
+    Adapter->>Fed: validate_property(uni_id, "degree_type", ...)
+    Fed-->>Adapter: Valid accreditation
+    Adapter->>Link: attester_permissions.contains(AddRecord)?
+    Link-->>Adapter: Yes
+    Adapter-->>Uni: ActionApproval<Permission><br/>{ target: trail_id,<br/>  permission: AddRecord,<br/>  authority: ComponentLink }
+    Note right of Adapter: Second hot potato created.
+
+    Uni->>Trail: add_record(<br/>  &mut trail,<br/>  request,<br/>  approval,<br/>  degree_data,<br/>  metadata,<br/>  clock, ctx)
+    Trail->>Trail: verify_and_consume(request, approval)<br/>Both hot potatoes destructured.
+    Trail->>Trail: Insert record into LinkedTable
+    Trail-->>Uni: RecordAdded event
+
+    Note over Uni,Link: Both hot potatoes consumed. PTB succeeds.
+```
+
+**Assets exchanged**:
+
+| Step | From | To | Asset | Lifetime |
+| --- | --- | --- | --- | --- |
+| 1 | Trail | Caller (PTB) | `ActionRequest<Permission>` | Hot potato — consumed in step 3 |
+| 2 | Adapter | Caller (PTB) | `ActionApproval<Permission>` | Hot potato — consumed in step 3 |
+| 3 | Caller | Trail | Both hot potatoes + record data | Consumed (destructured) |
+
+### C.4 Proposed State — Unauthorized Entity (Rejected)
+
+What happens when an entity without federation standing tries to operate.
+
+```mermaid
+sequenceDiagram
+    participant Bad as Unauthorized Entity
+    participant Trail as AuditTrail
+    participant Adapter as Hierarchies Adapter
+    participant Fed as Federation
+
+    Note over Bad,Fed: Single PTB — unauthorized attempt
+
+    Bad->>Trail: request_add_record(&trail, ctx)
+    Trail-->>Bad: ActionRequest<Permission><br/>{ target: trail_id,<br/>  permission: AddRecord,<br/>  requester: bad_address }
+    Note right of Trail: Hot potato created.<br/>Must be consumed.
+
+    Bad->>Adapter: approve(&federation, &cap, &link, &request, clock, ctx)
+    Adapter->>Fed: is_attester(bad_id)?
+    Fed-->>Adapter: No
+    Adapter->>Fed: is_accreditor(bad_id)?
+    Fed-->>Adapter: No
+    Adapter->>Fed: is_root_authority(bad_id)?
+    Fed-->>Adapter: No
+
+    Note over Adapter: ABORT — entity has no<br/>trust standing in federation
+
+    Note over Bad,Fed: PTB aborts. ActionRequest hot potato<br/>is never consumed. No state changes.<br/>No record added. Authorization enforced.
+```
+
+### C.5 Multi-Component Governance — One Federation, Multiple Components
+
+A single federation governs multiple components through separate `ComponentLink` objects.
+
+```mermaid
+flowchart TB
+    Fed["Federation<br/>'EuropeanUniversities'<br/><br/>Properties:<br/>- degree_type<br/>- research_grant<br/>- student_exchange"]
+
+    Link1["ComponentLink #1<br/>required_properties: [degree_type]<br/>attester → {AddRecord, CorrectRecord}<br/>accreditor → {+ DeleteRecord, UpdateMetadata}<br/>admin → {all}"]
+
+    Link2["ComponentLink #2<br/>required_properties: [research_grant]<br/>attester → {AddRecord}<br/>accreditor → {+ DeleteRecord}<br/>admin → {all}"]
+
+    Link3["ComponentLink #3<br/>required_properties: [student_exchange]<br/>attester → {AddRecord, CorrectRecord}<br/>admin → {all}"]
+
+    Trail1["AuditTrail<br/>'DegreeRecords'"]
+    Trail2["AuditTrail<br/>'GrantRecords'"]
+    Comp3["Future Component<br/>'ExchangeRegistry'"]
+
+    Fed --> Link1
+    Fed --> Link2
+    Fed --> Link3
+
+    Link1 --> Trail1
+    Link2 --> Trail2
+    Link3 --> Comp3
+
+    Uni["University<br/>(attester for degree_type)"]
+    Lab["Research Lab<br/>(attester for research_grant)"]
+
+    Uni -.->|"can write to"| Trail1
+    Uni -.->|"cannot access<br/>(not accredited for research_grant)"| Trail2
+    Lab -.->|"cannot access<br/>(not accredited for degree_type)"| Trail1
+    Lab -.->|"can write to"| Trail2
+```
+
+**Key insight**: Property scope determines which `ComponentLink` (and therefore which component instance) an entity can access. The university is accredited for "degree_type" so it can access the degree trail, but NOT the grant trail. The lab has the opposite access. One federation, multiple components, fine-grained scoping.
+
+### C.6 Future — Account Abstraction Adapter Flow
+
+When AA ships, the adapter changes but the component is untouched.
+
+```mermaid
+sequenceDiagram
+    participant User as AI Account<br/>(university registrar)
+    participant Auth as AuthenticatorFunction<br/>(on-chain, custom logic)
+    participant Trail as AuditTrail
+    participant AA as AA Adapter
+    participant Fed as Federation
+
+    Note over User,Fed: Transaction submitted with MoveAuthenticator
+
+    User->>Auth: Transaction + proof data
+    Auth->>Fed: Check accreditation for sender
+    Fed-->>Auth: Valid attester for "degree_type"
+    Auth-->>User: Authentication succeeds<br/>(AuthContext populated)
+
+    Note over User,Fed: PTB execution begins
+
+    User->>Trail: request_add_record(&trail, ctx)
+    Trail-->>User: ActionRequest<Permission>
+
+    User->>AA: approve(&auth_context, &request)
+    AA-->>User: ActionApproval<Permission>
+    Note right of AA: AA adapter reads<br/>AuthContext claims.<br/>No federation call needed —<br/>already validated during<br/>authentication.
+
+    User->>Trail: add_record(request, approval, data, ...)
+    Trail->>Trail: verify_and_consume → insert record
+    Trail-->>User: RecordAdded event
+
+    Note over User,Fed: Same trail code, same ActionRequest/Approval types.<br/>Different adapter. Zero component changes.
+```
+
+### C.7 Comparison — Before vs. After
+
+```mermaid
+flowchart LR
+    subgraph before["BEFORE: Embedded Governance"]
+        direction TB
+        B_Fed["Federation<br/>(disconnected)"]
+        B_Trail["AuditTrail<br/>+ RoleMap<br/>+ Capabilities<br/>+ Roles<br/>+ 17 Permissions"]
+        B_User["User"]
+
+        B_User -->|"presents Capability"| B_Trail
+        B_Trail -->|"checks own RoleMap"| B_Trail
+        B_Fed -.->|"no connection"| B_Trail
+    end
+
+    subgraph after["AFTER: External Authorization"]
+        direction TB
+        A_Fed["Federation<br/>(authority source)"]
+        A_Bridge["ComponentLink<br/>+ Adapter"]
+        A_Trail["AuditTrail<br/>(pure data)<br/>12 Permissions"]
+        A_User["User"]
+
+        A_User -->|"1. request"| A_Trail
+        A_Trail -->|"ActionRequest"| A_User
+        A_User -->|"2. approve"| A_Bridge
+        A_Bridge -->|"checks"| A_Fed
+        A_Bridge -->|"ActionApproval"| A_User
+        A_User -->|"3. execute"| A_Trail
+    end
+```
+
+## Appendix D: Referenced Materials
+
+- **IOTA Trust Framework**: <https://docs.iota.org/developer/iota-trust-framework>
 - **IOTA Network**: <https://docs.iota.org/>
-- **Move Book (Object Model, Storage)**: <https://move-book.com/object/> , <https://move-book.com/storage/>
+- **Move Book (Objects, Storage)**: <https://move-book.com/object/> , <https://move-book.com/storage/>
 - **Hierarchies**: <https://github.com/iotaledger/hierarchies> , <https://docs.iota.org/developer/iota-hierarchies/>
 - **Notarization**: <https://github.com/iotaledger/notarization> , <https://docs.iota.org/developer/iota-notarization/>
 - **Product-Core (tf_components)**: <https://github.com/iotaledger/product-core/tree/feat/tf-compoenents-dev-revoked-caps/components_move>
 - **Account Abstraction IIP**: <https://github.com/iotaledger/IIPs/discussions/35>
-- **IOTA Kiosk TransferPolicy pattern**: <https://docs.iota.org/developer/standards/kiosk/>
+- **IOTA Kiosk TransferPolicy**: <https://docs.iota.org/developer/standards/kiosk/>
