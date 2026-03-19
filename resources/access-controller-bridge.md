@@ -22,7 +22,8 @@
 10. [Account Abstraction Considerations](#10-account-abstraction-considerations)
 11. [Incremental Delivery](#11-incremental-delivery)
 12. [Trade-offs and Alternatives Considered](#12-trade-offs-and-alternatives-considered)
-13. [Conclusion](#13-conclusion)
+13. [Compliance and Security Analysis (GDPR, ISO 27001)](#13-compliance-and-security-analysis-gdpr-iso-27001)
+14. [Conclusion](#14-conclusion)
 
 - [Appendix A: Architecture Diagram](#appendix-a-architecture-diagram)
 - [Appendix B: Trust Level Mapping Example](#appendix-b-trust-level-mapping--concrete-example)
@@ -984,7 +985,286 @@ Each federation-component pairing needs a `ComponentLink` shared object.
 
 ---
 
-## 13. Conclusion
+## 13. Compliance and Security Analysis (GDPR, ISO 27001)
+
+This section examines the proposed architecture from a regulatory and security audit perspective. It identifies concerns an auditor would raise and proposes mitigations where possible.
+
+### 13.1 GDPR Analysis
+
+#### 13.1.1 Personal Data on a Public Blockchain
+
+GDPR applies when personal data of EU natural persons is processed. In the proposed architecture, personal data appears in several places:
+
+| Data Point | Location | Personal Data? |
+| --- | --- | --- |
+| `added_by: address` in records | AuditTrail (on-chain) | Yes, if address is linkable to a natural person |
+| `requester: address` in ActionRequest | PTB execution (transient, but in tx history) | Yes, same reason |
+| Entity IDs in `accreditations_to_attest` map | Federation (on-chain, public) | Yes — reveals who holds what role |
+| `creator: address` in trail | AuditTrail (on-chain) | Yes |
+| Event data (`RecordAdded`, `RecordDeleted`) | On-chain event log (permanent) | Yes — contains addresses and timestamps |
+| Record `data: D` (generic) | AuditTrail (on-chain) | Depends on what is stored |
+
+**GDPR concern**: All on-chain data on IOTA is **public and permanent** (readable by any validator or full node). If any of these fields can be linked to a natural person, GDPR applies to the entire data flow.
+
+#### 13.1.2 Right to Erasure (Article 17) — The Fundamental Tension
+
+The audit trail is designed for **tamper-evident immutability**. GDPR's right to erasure directly contradicts this design goal.
+
+The audit trail does provide `delete_record` and `delete_records_batch` functions, which remove records from the current on-chain state. However:
+
+- **Transaction history is permanent**: The `RecordAdded` event that originally stored the data is in the blockchain's event log and cannot be deleted.
+- **State snapshots**: Historical state may be accessible through archival nodes or checkpoints.
+- **The deletion event itself** (`RecordDeleted`) records `deleted_by` address and `sequence_number`, creating a permanent trace that a deletion occurred.
+
+**Auditor flag**: An auditor would flag that `delete_record` does not constitute GDPR-compliant erasure. The data persists in the blockchain's historical layers.
+
+**Mitigation**: Do not store personal data directly on-chain. Instead:
+
+- Store a **hash** of the data on-chain (the audit trail becomes a hash chain, proving integrity without exposing content).
+- Store the actual data **off-chain** in a system that supports deletion (encrypted database, IPFS with unpinning, etc.).
+- The on-chain record proves "data with hash X existed at time T" without revealing the data itself. If the off-chain data is deleted, the hash becomes unlinkable.
+
+This is an architectural recommendation that applies regardless of the bridge proposal — it is a property of the audit trail's data model.
+
+#### 13.1.3 Public Visibility of Access Relationships
+
+The federation's accreditation maps are on a shared object, readable by anyone. This means:
+
+- It is publicly visible that "address 0xABC is an attester for catch_species in federation NorthAtlanticFisheries"
+- If 0xABC is linked to a specific fisherman, their professional accreditation status is public
+
+**Auditor flag**: Publishing role/accreditation status of natural persons on a public blockchain may require explicit consent and a lawful basis under GDPR Article 6.
+
+**Mitigation**:
+
+- Use **pseudonymous identifiers** (e.g., IOTA Identity DIDs) rather than raw addresses where possible.
+- Consider whether accreditation status needs to be on-chain, or if a zero-knowledge proof approach could prove "I am accredited" without revealing the specific identity.
+- With Account Abstraction, AI Accounts provide stable addresses decoupled from public keys, offering a layer of pseudonymization.
+
+#### 13.1.4 Data Protection by Design (Article 25)
+
+GDPR requires "data protection by design and by default." Current gaps:
+
+| Requirement | Current Status | Gap |
+| --- | --- | --- |
+| Encryption at rest | Not implemented — on-chain data is plaintext | Records should encrypt sensitive `data: D` before on-chain storage |
+| Pseudonymization | Not implemented — raw addresses throughout | Use DIDs or derived identifiers |
+| Purpose limitation | Not enforced — `data: D` is generic with no purpose tagging | `ComponentLink` could include a `purpose` field documenting lawful basis |
+| Data minimization | Not enforced — any data can be stored in records | Application-level concern; hash-only on-chain storage addresses this |
+| Retention policies | Partially addressed via locking/deletion mechanisms | No built-in automatic expiration or retention enforcement |
+| Consent tracking | Not implemented | Application-level concern; not in scope of the smart contract layer |
+
+#### 13.1.5 Data Controller / Processor Roles
+
+GDPR requires clear identification of data controllers and processors:
+
+| Entity | GDPR Role | Reasoning |
+| --- | --- | --- |
+| Federation Root Authority (e.g., Maritime Authority) | **Data Controller** | Determines the purposes and means of processing (defines properties, grants access, creates governance structure) |
+| Accreditor (e.g., Regional Inspector) | **Data Controller** or **Processor** | May determine purposes (if independently deciding what to record) or act on controller's instructions |
+| Attester (e.g., Fisherman) | **Data Processor** or **Data Subject** | Acts within scope defined by accreditation; if recording own data, may also be data subject |
+| IOTA Network Validators | **Data Processor** | Process transactions on behalf of controllers; do not determine purposes |
+
+**Auditor flag**: The decentralized nature makes controller identification ambiguous. A Data Protection Impact Assessment (DPIA) should be conducted before deployment with personal data.
+
+#### 13.1.6 Cross-Border Data Transfers (Chapter V)
+
+IOTA validators operate globally. On-chain data is replicated to all validators regardless of jurisdiction.
+
+**Auditor flag**: This constitutes international data transfer. If EU personal data is processed, Standard Contractual Clauses (SCCs) or equivalent safeguards may be required for validator operators in non-adequate jurisdictions.
+
+**Mitigation**: This is an IOTA network-level concern, not specific to the bridge. The hash-only on-chain approach eliminates the issue — hashes alone are not personal data.
+
+### 13.2 ISO 27001 Analysis
+
+#### 13.2.1 Strengths — Where the Proposed Architecture Aligns Well
+
+**A.8 Access Control (Access management)**:
+
+- **Least privilege**: Three trust levels (attester/accreditor/root) with escalating permissions. Attesters get minimal write access; admin operations require root authority.
+- **Access provisioning**: Explicitly auditable — every accreditation grant is an on-chain transaction with timestamp and authorizer.
+- **Timely revocation**: Immediate, universal, no stale tokens. Superior to the embedded RBAC model where Capability objects persist in wallets after revocation.
+- **Segregation of duties**: Natural separation between governance (root authority), management (accreditor), and operations (attester).
+
+**A.8.15 Logging (Logging and monitoring)**:
+
+- Every operation emits on-chain events: `RecordAdded`, `RecordDeleted`, `AuditTrailCreated`, `AuditTrailDeleted`.
+- Every authorization decision goes through the adapter, which is on-chain and fully auditable.
+- Transaction history provides complete forensic capability: who did what, when, authorized by whom.
+
+**A.5.10 Acceptable use of information (Information security in supplier relationships)**:
+
+- The `ComponentLink` explicitly documents what each trust level can do, creating a formal access control policy artifact on-chain.
+
+#### 13.2.2 Concerns — Where Auditors Would Raise Flags
+
+**A.8.2 Privileged access management — Root Authority Key Risk**:
+
+The root authority keys are the highest-privilege credentials in the system. Compromise of ALL root authority keys means:
+
+- Attacker gains full admin access to all linked components
+- Attacker can grant themselves accreditations, modify ComponentLinks, revoke legitimate authorities
+- There is **no recovery mechanism** — once all root authorities are compromised, the federation is permanently compromised
+
+| Risk | Severity | Current Mitigation | Gap |
+| --- | --- | --- | --- |
+| Single root authority key compromise | High | Multi-root-authority: others can revoke the compromised one | Adequate if multiple root authorities are used |
+| All root authority keys compromised | Critical | None | **No break-glass or recovery procedure** |
+| All root authority keys lost | Critical | None | **Federation becomes permanently ungovernable** |
+
+**Recommendation**: Implement a **recovery mechanism** — e.g., a time-locked recovery address set at federation creation, or social recovery requiring M-of-N signatures from a pre-defined recovery set. This should be designed at the hierarchies level.
+
+**A.8.3 Information access restriction — ComponentLink Governance Gap**:
+
+The `ComponentLink` is modified by any single root authority. There is no approval workflow or multi-signature requirement for changes that could escalate privileges:
+
+- A compromised root authority could change `attester_permissions` to include `DeleteAuditTrail`
+- A compromised root authority could grant `admin_permissions` to all trust levels
+
+**Auditor flag**: Privilege escalation through ComponentLink modification is a single-key operation.
+
+**Recommendation**: Add a **multi-authority approval** requirement for ComponentLink changes that escalate permissions (e.g., adding admin-level permissions to attester trust level). Or at minimum, emit events on ComponentLink modification for monitoring.
+
+**A.8.15 Logging — Missing Audit Events for Configuration Changes**:
+
+The current design does not emit events when:
+
+- A `ComponentLink` is created
+- A `ComponentLink`'s permissions are modified
+- A `ComponentLink` is deleted
+
+ISO 27001 (A.8.15) requires logging of access control configuration changes.
+
+**Recommendation**: Add events:
+
+```move
+public struct ComponentLinkCreated has copy, drop {
+    link_id: ID,
+    federation_id: ID,
+    target_id: ID,
+    created_by: address,
+    timestamp: u64,
+}
+
+public struct ComponentLinkPermissionsUpdated has copy, drop {
+    link_id: ID,
+    updated_by: address,
+    timestamp: u64,
+}
+```
+
+**A.8.4 Access to source code — Smart Contract Transparency**:
+
+Move packages deployed on IOTA are public and readable. This is a strength for auditability but means:
+
+- Authorization logic is publicly inspectable (attackers can study it for weaknesses)
+- This is accepted practice in blockchain and is generally considered a strength (open-source security model)
+
+**A.5.29 Information security during disruption — No Emergency Freeze**:
+
+If a security incident is detected (e.g., compromised key, suspicious bulk operations), there is no mechanism to immediately freeze all operations on linked components.
+
+The audit trail has `write_lock` and `delete_trail_lock` mechanisms, but these require a separate authorized operation to activate — which the attacker could also block if they've compromised the root authority.
+
+**Recommendation**: Add an **emergency freeze** mechanism — e.g., any root authority can set a federation-wide freeze flag that the adapter checks before producing approvals. This should require only ONE root authority (unlike normal governance which might require consensus) to enable rapid incident response.
+
+**A.8.10 Information deletion — Blockchain Immutability**:
+
+Same concern as GDPR Article 17. ISO 27001 requires that information can be securely deleted when no longer needed. Blockchain immutability prevents this.
+
+**Recommendation**: Same as GDPR — hash-only on-chain, actual data off-chain.
+
+#### 13.2.3 Access Review Support (A.8.2)
+
+ISO 27001 requires regular review of access rights. The proposed architecture has a strong foundation for this:
+
+- All accreditations are queryable on-chain via `get_accreditations_to_attest` and `get_accreditations_to_accredit`
+- All ComponentLinks are on-chain objects with explicit permission sets
+- Historical accreditation grants/revocations are in the transaction/event log
+
+**Gap**: There is no built-in query that produces a complete "access matrix" — who has what level of access to which components. This would need to be assembled by an off-chain tool that cross-references federation accreditations with ComponentLinks.
+
+**Recommendation**: Provide an off-chain SDK function or indexer query that produces a complete access report for audit purposes.
+
+### 13.3 Security Threat Analysis
+
+#### 13.3.1 Threat: Front-Running Revocation
+
+```text
+Timeline:
+  T0: Inspector submits tx to revoke fisherman's accreditation
+  T1: Fisherman observes pending revocation in mempool
+  T2: Fisherman front-runs with a batch of fraudulent records
+  T3: Revocation executes — but fraudulent records are already on-chain
+```
+
+On IOTA, transaction ordering is determined by validators. An attacker who monitors pending transactions could insert malicious operations before a revocation takes effect.
+
+**Severity**: Medium. The fraudulent records have timestamps and `added_by` fields, so they are attributable and can be corrected or deleted by an accreditor.
+
+**Mitigation**: The audit trail's `CorrectRecord` permission and the correction tracking system (`RecordCorrection` with `replaces` / `is_replaced_by`) provide a mechanism to address this after the fact. For high-security scenarios, a time-delay on new records (e.g., records enter a "pending" state before becoming final) could be considered.
+
+#### 13.3.2 Threat: Compromised Attester Flooding
+
+An attester whose key is compromised can add unlimited garbage records to all trails they have access to.
+
+**Severity**: Medium-High. Records have storage costs (IOTA tokens for storage deposits), which provides some economic rate-limiting, but a well-funded attacker could still cause significant pollution.
+
+**Mitigation**:
+
+- The `write_lock` mechanism can freeze writes when abuse is detected.
+- An accreditor or root authority can revoke the compromised attester's accreditation (immediate effect).
+- `DeleteRecord` and `DeleteAllRecords` permissions allow cleanup.
+- A per-address rate limit in the adapter (e.g., max N records per time window per attester) could be added as a future enhancement.
+
+#### 13.3.3 Threat: ComponentLink Manipulation
+
+A compromised root authority modifies a ComponentLink to grant admin permissions to all trust levels, then uses a low-privilege attester account to delete the trail.
+
+**Severity**: High. This is a privilege escalation attack through configuration manipulation.
+
+**Mitigation**:
+
+- Use multiple root authorities so compromise of one does not enable unilateral configuration changes.
+- Emit events on ComponentLink modification (recommended above) so monitoring systems can detect suspicious changes.
+- Consider requiring M-of-N root authority approval for permission escalation in ComponentLink.
+
+#### 13.3.4 Threat: Orphaned Trail (Denial of Service)
+
+An attacker creates a ComponentLink pointing to a trail they don't control, with a federation they do control. They can then approve operations on the trail that they shouldn't have access to.
+
+**Severity**: This is NOT actually a threat in the current design. The `verify_and_consume` function checks that `approval.target == request.target`, and the `request.target` is the trail's actual ID (set by the trail itself in `request_add_record`). The trail doesn't care which ComponentLink was used — it only verifies the ActionApproval matches its own ID. However, the ComponentLink's `target_id` must match the request's target in the adapter's `approve()` function, so a ComponentLink pointing to an unrelated trail would only produce approvals for that trail.
+
+**Wait — this IS a concern**: If anyone can create a ComponentLink for any trail, then anyone can create a federation, make themselves root authority, create a ComponentLink targeting someone else's trail, and approve their own operations on it.
+
+**This is a critical design gap.**
+
+**Mitigation**: The trail must have a way to specify which ComponentLinks (or which federations) it trusts. Options:
+
+- The trail stores a `trusted_federation_id` or `trusted_link_ids` set, and `verify_and_consume` checks the approval's `authority` against the trusted set.
+- Only the trail creator can register trusted ComponentLinks (via a trail-level configuration function).
+- The ComponentLink creation requires proving authority over the target (e.g., presenting a trail-creator capability).
+
+This is a **must-fix** before the design is implemented. Without it, the authorization model is open to bypass.
+
+### 13.4 Summary of Compliance Gaps and Recommendations
+
+| # | Area | Finding | Severity | Recommendation |
+| --- | --- | --- | --- | --- |
+| 1 | GDPR Art. 17 | On-chain data cannot be truly erased | High | Store hashes on-chain, actual data off-chain |
+| 2 | GDPR Art. 25 | No encryption, pseudonymization, or purpose limitation | Medium | Encrypt data before on-chain storage; use DIDs; add purpose field to ComponentLink |
+| 3 | GDPR Art. 6 | Public visibility of accreditation status (role assignments) | Medium | Use pseudonymous identifiers; consider ZK proofs for accreditation verification |
+| 4 | ISO A.8.2 | No recovery procedure for total root authority key loss/compromise | Critical | Implement time-locked recovery or social recovery mechanism |
+| 5 | ISO A.8.3 | ComponentLink permission escalation is single-key operation | High | Require multi-authority approval for permission escalation |
+| 6 | ISO A.8.15 | No audit events for ComponentLink creation/modification | High | Emit events for all configuration changes |
+| 7 | ISO A.5.29 | No emergency freeze mechanism for incident response | Medium | Add federation-wide emergency freeze flag |
+| 8 | Security | **Untrusted ComponentLink bypass** — anyone can create a ComponentLink for any trail | **Critical** | Trail must whitelist trusted federations or ComponentLinks |
+| 9 | Security | Front-running revocation allows last-moment malicious writes | Medium | Correction mechanism exists; consider time-delayed record finalization for high-security |
+| 10 | Security | No rate limiting for attester record flooding | Medium | Add per-address rate limit in adapter or at trail level |
+
+---
+
+## 14. Conclusion
 
 The IOTA Trust Framework's components currently solve authorization in isolation. The audit trail embeds a full RBAC system, creating per-instance governance silos disconnected from hierarchies — the very component designed to manage delegated trust.
 
