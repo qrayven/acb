@@ -18,10 +18,11 @@
 6. [Hierarchies as Authority Source — Respecting Original Intent](#6-hierarchies-as-authority-source--respecting-original-intent)
 7. [Detailed Design](#7-detailed-design)
 8. [Impact on the Audit Trail](#8-impact-on-the-audit-trail)
-9. [Account Abstraction Considerations](#9-account-abstraction-considerations)
-10. [Incremental Delivery](#10-incremental-delivery)
-11. [Trade-offs and Alternatives Considered](#11-trade-offs-and-alternatives-considered)
-12. [Conclusion](#12-conclusion)
+9. [Permission Lifecycle: Granting, Changing, Revoking](#9-permission-lifecycle-granting-changing-revoking)
+10. [Account Abstraction Considerations](#10-account-abstraction-considerations)
+11. [Incremental Delivery](#11-incremental-delivery)
+12. [Trade-offs and Alternatives Considered](#12-trade-offs-and-alternatives-considered)
+13. [Conclusion](#13-conclusion)
 
 - [Appendix A: Architecture Diagram](#appendix-a-architecture-diagram)
 - [Appendix B: Trust Level Mapping Example](#appendix-b-trust-level-mapping--concrete-example)
@@ -359,13 +360,18 @@ public fun request_requester<P: drop>(r: &ActionRequest<P>): address { r.request
 ```move
 module access_controller_bridge::hierarchies_adapter;
 
-use hierarchies::main::{Self, Federation, AccreditCap};
+use hierarchies::main::{Self, Federation, RootAuthorityCap};
 use hierarchies::property_name::PropertyName;
 use tf_components::authorization::{Self, ActionRequest, ActionApproval};
 use iota::vec_set::VecSet;
 use std::type_name;
 
 /// Connects a federation to a specific component instance.
+/// Created by a federation root authority. Shared object.
+///
+/// Governance:
+///   Only root authorities of the linked federation can create or modify this object.
+///   The federation's root authorities are the ultimate governors of the bridge.
 public struct ComponentLink<phantom P: drop> has key, store {
     id: UID,
     federation_id: ID,
@@ -376,8 +382,57 @@ public struct ComponentLink<phantom P: drop> has key, store {
     admin_permissions: VecSet<P>,
 }
 
+/// Create a new ComponentLink. Only callable by a root authority
+/// of the specified federation.
+public fun create_component_link<P: drop + copy>(
+    federation: &Federation,
+    cap: &RootAuthorityCap,
+    target_id: ID,
+    required_properties: vector<PropertyName>,
+    attester_permissions: VecSet<P>,
+    accreditor_permissions: VecSet<P>,
+    admin_permissions: VecSet<P>,
+    ctx: &mut TxContext,
+): ComponentLink<P> {
+    assert!(federation.is_root_authority(&ctx.sender().to_id()));
+
+    let link = ComponentLink {
+        id: object::new(ctx),
+        federation_id: federation.federation_id(),
+        target_id,
+        required_properties,
+        attester_permissions,
+        accreditor_permissions,
+        admin_permissions,
+    };
+    link
+}
+
+/// Update the permission sets. Only callable by a root authority.
+public fun update_permissions<P: drop + copy>(
+    link: &mut ComponentLink<P>,
+    federation: &Federation,
+    cap: &RootAuthorityCap,
+    attester_permissions: VecSet<P>,
+    accreditor_permissions: VecSet<P>,
+    admin_permissions: VecSet<P>,
+    ctx: &TxContext,
+) {
+    assert!(link.federation_id == federation.federation_id());
+    assert!(federation.is_root_authority(&ctx.sender().to_id()));
+    link.attester_permissions = attester_permissions;
+    link.accreditor_permissions = accreditor_permissions;
+    link.admin_permissions = admin_permissions;
+}
+
 /// Approve an action request based on the caller's trust standing
 /// in the linked federation.
+///
+/// NOTE: No AccreditCap or RootAuthorityCap parameter is needed.
+/// The adapter only READS federation state through public functions
+/// (is_root_authority, is_accreditor, is_attester, validate_property).
+/// The caller's identity is verified through ctx.sender(), which is
+/// cryptographically guaranteed by the IOTA runtime.
 ///
 /// The flow:
 /// 1. Verify the link matches the request's target
@@ -388,7 +443,6 @@ public struct ComponentLink<phantom P: drop> has key, store {
 /// 5. Produce an ActionApproval
 public fun approve<P: drop + copy>(
     federation: &Federation,
-    cap: &AccreditCap,
     link: &ComponentLink<P>,
     request: &ActionRequest<P>,
     clock: &Clock,
@@ -547,9 +601,10 @@ A fisherman (attester in federation "NorthAtlanticFisheries") adds a catch recor
 let request = audit_trail::request_add_record(&trail, ctx);
 
 // Step 2: Hierarchies adapter verifies trust standing and approves
+//         No capability object needed — adapter reads federation state
+//         and verifies ctx.sender() against accreditation maps
 let approval = hierarchies_adapter::approve(
-    &federation,        // NorthAtlanticFisheries federation
-    &accredit_cap,      // fisherman's AccreditCap
+    &federation,        // NorthAtlanticFisheries federation (shared object, read-only)
     &component_link,    // links this federation to this trail
     &request,           // borrows the request to inspect it
     clock,
@@ -600,9 +655,224 @@ The audit trail becomes a **pure data component** — it stores records, enforce
 
 ---
 
-## 9. Account Abstraction Considerations
+## 9. Permission Lifecycle: Granting, Changing, Revoking
 
-### 9.1 Authentication vs. Authorization
+A critical property of the proposed architecture: **all permission lifecycle operations happen at the federation or ComponentLink level. The component (audit trail) is never modified.** This section traces every lifecycle event through the system.
+
+### 9.1 Granting Access
+
+**Scenario**: The maritime authority wants a new fisherman to be able to log catches.
+
+```mermaid
+sequenceDiagram
+    participant MA as Maritime Authority<br/>(Root Authority)
+    participant Fed as Federation<br/>"NorthAtlanticFisheries"
+    participant Link as ComponentLink<br/>(already exists)
+    participant Trail as AuditTrail<br/>"CatchRecords"
+    participant Fish as New Fisherman
+
+    Note over MA,Fish: Step 1: Grant accreditation in the federation
+
+    MA->>Fed: create_accreditation_to_attest(<br/>  fisherman_id,<br/>  ["catch_species"])
+    Fed->>Fed: Record fisherman as attester<br/>for "catch_species"
+    Fed-->>MA: Accreditation recorded
+
+    Note over Link,Trail: Nothing happens here.<br/>The ComponentLink already exists.<br/>The trail is not touched.
+
+    Note over MA,Fish: Step 2: Fisherman can now operate (next PTB)
+
+    Fish->>Trail: request_add_record(&trail, ctx)
+    Trail-->>Fish: ActionRequest
+
+    Fish->>Link: approve(&federation, &link, &request, clock, ctx)
+    Note over Link: Checks federation:<br/>is_attester(fisherman_id)? YES<br/>property scope matches? YES<br/>attester can AddRecord? YES
+    Link-->>Fish: ActionApproval
+
+    Fish->>Trail: add_record(request, approval, catch_data, ...)
+    Trail-->>Fish: RecordAdded event
+```
+
+**Key property**: Granting access is a single federation operation. No changes to any trail, no changes to the ComponentLink, no capability objects issued. The fisherman's next call to `approve()` succeeds because the federation state has changed.
+
+### 9.2 Revoking Access
+
+**Scenario**: A fisherman's license is suspended. They must immediately lose the ability to log catches.
+
+```mermaid
+sequenceDiagram
+    participant Insp as Regional Inspector<br/>(Accreditor)
+    participant Fed as Federation<br/>"NorthAtlanticFisheries"
+    participant Link as ComponentLink
+    participant Trail as AuditTrail<br/>"CatchRecords"
+    participant Fish as Suspended Fisherman
+
+    Note over Insp,Fish: Step 1: Revoke accreditation in the federation
+
+    Insp->>Fed: revoke_accreditation_to_attest(<br/>  fisherman_id,<br/>  permission_id)
+    Fed->>Fed: Remove fisherman from<br/>attesters for "catch_species"
+    Fed-->>Insp: Accreditation revoked
+
+    Note over Link,Trail: Nothing happens here.<br/>No trail modification. No capability to chase down.
+
+    Note over Insp,Fish: Step 2: Fisherman's next attempt is denied
+
+    Fish->>Trail: request_add_record(&trail, ctx)
+    Trail-->>Fish: ActionRequest
+
+    Fish->>Link: approve(&federation, &link, &request, clock, ctx)
+    Note over Link: Checks federation:<br/>is_attester(fisherman_id)? NO<br/>is_accreditor(fisherman_id)? NO<br/>is_root_authority(fisherman_id)? NO
+    Note over Link: ABORT — no trust standing
+
+    Note over Fish,Trail: PTB aborts. No record added.<br/>Revocation is immediate.
+```
+
+**Key property**: Revocation is immediate and universal. There are no stale capability objects floating in the fisherman's wallet that could be presented elsewhere. Every operation checks live federation state. The moment accreditation is revoked, all access through all ComponentLinks for that federation is denied.
+
+**Comparison with embedded RBAC**: In the current model, revoking access means adding a Capability ID to the RoleMap's denylist. The Capability object still exists in the user's wallet. If the denylist check has a bug, or if the Capability is presented to a different system that doesn't share the denylist, revocation leaks. In the proposed model, there is no token to revoke — the authority check is against live state.
+
+### 9.3 Changing Scope (Promoting / Demoting)
+
+**Scenario**: A fisherman proves reliable and is promoted to regional inspector (accreditor).
+
+```mermaid
+sequenceDiagram
+    participant MA as Maritime Authority<br/>(Root Authority)
+    participant Fed as Federation
+
+    Note over MA,Fed: Promote: grant accreditation-to-accredit
+
+    MA->>Fed: create_accreditation_to_accredit(<br/>  fisherman_id,<br/>  ["catch_species"])
+    Fed->>Fed: Record fisherman as accreditor<br/>for "catch_species"
+    Fed-->>MA: AccreditCap transferred to fisherman
+
+    Note over MA,Fed: The fisherman is now BOTH attester<br/>and accreditor for "catch_species".<br/><br/>Next time they call approve(), the adapter<br/>finds is_accreditor = true and grants<br/>accreditor-level permissions<br/>(AddRecord + DeleteRecord + UpdateMetadata).
+```
+
+No ComponentLink changes. No trail changes. The adapter's trust-level check now returns a higher level, so the entity gains more permissions automatically.
+
+**Demotion** works the same way in reverse — revoke the accreditation-to-accredit, and the entity drops back to attester level.
+
+### 9.4 Changing the Permission Mapping
+
+**Scenario**: Regulations change — attesters (fishermen) should now also be able to `DeleteRecord` their own erroneous entries.
+
+```mermaid
+sequenceDiagram
+    participant MA as Maritime Authority<br/>(Root Authority)
+    participant Link as ComponentLink
+    participant Trail as AuditTrail
+
+    Note over MA,Trail: Update the bridge configuration
+
+    MA->>Link: update_permissions(<br/>  federation, root_auth_cap,<br/>  attester: {AddRecord, CorrectRecord, DeleteRecord},<br/>  accreditor: {... same ...},<br/>  admin: {... same ...})
+    Link->>Link: attester_permissions updated
+    Link-->>MA: Done
+
+    Note over Trail: Trail is not modified.<br/>No migration, no upgrade.
+
+    Note over MA,Trail: Immediately effective:<br/>all attesters can now DeleteRecord<br/>through this ComponentLink.
+```
+
+**Governance of ComponentLink**: Only root authorities of the linked federation can call `update_permissions`. This is enforced by checking `federation.is_root_authority(&ctx.sender().to_id())` and verifying the `RootAuthorityCap`. The federation's root authorities are the ultimate governors of both the federation AND the bridge configuration.
+
+### 9.5 Property Revocation in the Federation
+
+**Scenario**: The federation decides to phase out "catch_species" as a recognized property (e.g., replaced by a more specific "catch_species_v2").
+
+```mermaid
+sequenceDiagram
+    participant MA as Maritime Authority<br/>(Root Authority)
+    participant Fed as Federation
+    participant Link as ComponentLink
+    participant Fish as Any Fisherman
+
+    MA->>Fed: revoke_property("catch_species", clock)
+    Fed->>Fed: Set valid_until_ms on "catch_species"
+    Fed-->>MA: Property revoked
+
+    Note over Link,Fish: All ComponentLinks requiring "catch_species"<br/>are now effectively disabled.
+
+    Fish->>Link: approve(&federation, &link, &request, clock, ctx)
+    Note over Link: Checks required_properties against federation:<br/>"catch_species" is_valid_at_time? NO (revoked)
+    Note over Link: ABORT — required property no longer valid
+
+    Note over Fish: All access via this ComponentLink stops.<br/>A new ComponentLink with "catch_species_v2"<br/>must be created for the new property.
+```
+
+### 9.6 Root Authority Revocation
+
+**Scenario**: A root authority (e.g., a regional maritime office) is removed from the federation.
+
+The revoked root authority immediately loses:
+
+- Admin access to all linked components (adapter checks `is_root_authority` → false)
+- Ability to modify any `ComponentLink` (governance function checks `is_root_authority` → false)
+- Ability to grant/revoke accreditations in the federation
+
+If reinstated (`reinstate_root_authority`), all access is restored immediately.
+
+### 9.7 Bootstrapping: Creating the Initial Setup
+
+The full initial setup follows this sequence:
+
+```mermaid
+sequenceDiagram
+    participant Auth as Maritime Authority
+    participant Fed as Federation
+    participant Bridge as Bridge Package
+    participant Trail as AuditTrail
+
+    Note over Auth,Trail: Phase 1: Create governance structure
+
+    Auth->>Fed: new_federation()
+    Fed-->>Auth: Creator becomes Root Authority<br/>+ RootAuthorityCap + AccreditCap
+
+    Auth->>Fed: add_property("catch_species", ...)
+    Auth->>Fed: add_property("vessel_safety", ...)
+
+    Note over Auth,Trail: Phase 2: Create the component
+
+    Auth->>Trail: create(data, locking_config, metadata, clock)
+    Trail-->>Auth: Trail created (shared object, no embedded RBAC)
+    Note right of Trail: Trail is inert until<br/>a ComponentLink connects it<br/>to a federation.
+
+    Note over Auth,Trail: Phase 3: Bridge them
+
+    Auth->>Bridge: create_component_link(<br/>  federation, root_auth_cap,<br/>  trail_id,<br/>  required_properties: ["catch_species"],<br/>  attester: {AddRecord, CorrectRecord},<br/>  accreditor: {+DeleteRecord, UpdateMetadata},<br/>  admin: {all 12})
+    Bridge-->>Auth: ComponentLink created (shared object)
+
+    Note over Auth,Trail: Phase 4: Grant access to participants
+
+    Auth->>Fed: create_accreditation_to_attest(<br/>  fisherman_1, ["catch_species"])
+    Auth->>Fed: create_accreditation_to_attest(<br/>  fisherman_2, ["catch_species"])
+    Auth->>Fed: create_accreditation_to_accredit(<br/>  inspector_1, ["catch_species"])
+
+    Note over Auth,Trail: System is live. Fishermen can add records.<br/>Inspector can manage records.<br/>Maritime authority has full admin.
+```
+
+**Trail creation is decoupled from governance.** The trail is created as a simple shared data container. It only becomes operational when a ComponentLink connects it to a federation. This separation means:
+
+- Anyone can create a trail (it's just data storage)
+- Only a federation root authority can connect it to governance
+- An unlinked trail is dormant — no operations possible (no way to produce ActionApproval)
+
+### 9.8 Summary: No Stale Tokens, No Per-Trail Governance
+
+| Operation | Current Model (Embedded RBAC) | Proposed Model (External Authorization) |
+| --- | --- | --- |
+| Grant access | Create role on trail + issue Capability per trail | Single federation accreditation (applies to all linked trails) |
+| Revoke access | Add Capability to trail's denylist. Capability object still in user's wallet | Revoke federation accreditation. No tokens to chase. Immediate |
+| Change scope | Issue new Capability with different role, revoke old one, per trail | Update federation accreditation. Immediate across all trails |
+| Change what permissions mean | Update role permissions on each trail's RoleMap, per trail | Update ComponentLink (one object). Immediate |
+| Promote entity | Create new role + capability on each trail | Grant accreditation-to-accredit in federation. Immediate everywhere |
+| Revoke property domain | Not possible (RBAC has no concept of domain properties) | Revoke property in federation. All related access stops |
+| Multi-trail governance | Manual per-trail setup for every new trail | One federation + one ComponentLink per trail. Accreditations apply automatically |
+
+---
+
+## 10. Account Abstraction Considerations
+
+### 10.1 Authentication vs. Authorization
 
 Account Abstraction (AA, per [IIP #35](https://github.com/iotaledger/IIPs/discussions/35)) introduces AI Accounts with programmable authentication — custom Move functions replace cryptographic signature verification.
 
@@ -616,7 +886,7 @@ ActionRequest/Approval        →  "Alice MAY add records to trail X"
 
 These are orthogonal. AA doesn't replace the pattern — it complements it.
 
-### 9.2 AA as an Authority Source
+### 10.2 AA as an Authority Source
 
 An AA adapter would translate authenticated context into `ActionApproval`:
 
@@ -636,19 +906,19 @@ public fun approve<P: drop + copy>(
 }
 ```
 
-### 9.3 Patterns AA Enables
+### 10.3 Patterns AA Enables
 
 - **Implicit authorization**: The AI Account's authenticator checks federation accreditation as part of authentication. The PTB becomes simpler — no explicit adapter call needed.
 - **Account-level policies**: Authorization rules live in the account definition, reducing on-chain configuration objects.
 - **Key rotation resilience**: Trust is tied to the account (persistent object with stable address), not to a specific key.
 
-### 9.4 Why the Pattern Is AA-Ready
+### 10.4 Why the Pattern Is AA-Ready
 
 The ActionRequest/Approval protocol doesn't care HOW the approval is produced. AA is just another adapter. When AA ships, existing components and existing `ComponentLink` objects continue to work — you simply swap the adapter used in the PTB.
 
 ---
 
-## 10. Incremental Delivery
+## 11. Incremental Delivery
 
 Each increment is independently valuable and deployable.
 
@@ -680,33 +950,33 @@ Each increment is independently valuable and deployable.
 
 ---
 
-## 11. Trade-offs and Alternatives Considered
+## 12. Trade-offs and Alternatives Considered
 
-### 11.1 Rejected: Hierarchies Issues Capabilities for Audit Trail RoleMaps
+### 12.1 Rejected: Hierarchies Issues Capabilities for Audit Trail RoleMaps
 
 **Idea**: Keep embedded RoleMap. Have hierarchies issue `tf_components::Capability` objects for each trail's RoleMap.
 
 **Why rejected**: Doesn't fix the architecture. The trail is still its own governance silo. Each trail still needs per-trail capability setup. Hierarchies becomes an admin of the trail's embedded RBAC rather than a sovereign authority source. And it couples hierarchies to the specific RoleMap implementation.
 
-### 11.2 Rejected: Generic Authorization Policy Object With Runtime Dispatch
+### 12.2 Rejected: Generic Authorization Policy Object With Runtime Dispatch
 
 **Idea**: A `Policy<P>` shared object that dispatches to different authorization backends at runtime.
 
 **Why rejected**: Move doesn't have dynamic dispatch or trait objects. Would require enumerating all backends at compile time. The hot potato pattern achieves the same goal through composition in PTBs — more aligned with Move's design.
 
-### 11.3 Rejected: Map Individual Properties to Individual Permissions
+### 12.3 Rejected: Map Individual Properties to Individual Permissions
 
 **Idea**: An earlier version of this proposal mapped federation properties (e.g., "record_writer") directly to audit trail permissions (e.g., `AddRecord`).
 
 **Why rejected**: This misuses hierarchies. It requires inventing artificial properties that are really operational flags. Properties should remain domain concepts ("catch_species", "fishing_zone"). The correct abstraction is the two-dimensional mapping: trust level (root/accreditor/attester) determines operation category, property scope determines which component instances.
 
-### 11.4 Trade-off: PTB Complexity
+### 12.4 Trade-off: PTB Complexity
 
 The pattern requires three steps per operation in a PTB (request → approve → execute) versus one step today (call with Capability).
 
 **Why acceptable**: The explicit flow is a *feature* in security-sensitive contexts — authorization is visible and auditable. SDK helpers and client libraries can compose the PTB steps, hiding complexity from end users. The on-chain semantics are clearer than implicit Capability checking.
 
-### 11.5 Trade-off: ComponentLink Configuration Objects
+### 12.5 Trade-off: ComponentLink Configuration Objects
 
 Each federation-component pairing needs a `ComponentLink` shared object.
 
@@ -714,7 +984,7 @@ Each federation-component pairing needs a `ComponentLink` shared object.
 
 ---
 
-## 12. Conclusion
+## 13. Conclusion
 
 The IOTA Trust Framework's components currently solve authorization in isolation. The audit trail embeds a full RBAC system, creating per-instance governance silos disconnected from hierarchies — the very component designed to manage delegated trust.
 
@@ -894,7 +1164,7 @@ sequenceDiagram
     Trail-->>Fish: ActionRequest<br/>{ target: trail_id,<br/>  permission: AddRecord,<br/>  requester: fisherman_addr }
     Note right of Trail: Hot potato created.<br/>MUST be consumed<br/>or PTB aborts.
 
-    Fish->>Adapter: approve(<br/>  &federation,<br/>  &accredit_cap,<br/>  &component_link,<br/>  &request,<br/>  clock, ctx)
+    Fish->>Adapter: approve(<br/>  &federation,<br/>  &component_link,<br/>  &request,<br/>  clock, ctx)
     Adapter->>Fed: is_attester(fisherman_id)?
     Fed-->>Adapter: Yes
     Adapter->>Fed: validate_property(fisherman_id, "catch_species", ...)
@@ -937,7 +1207,7 @@ sequenceDiagram
     Trail-->>Bad: ActionRequest<Permission><br/>{ target: trail_id,<br/>  permission: AddRecord,<br/>  requester: bad_address }
     Note right of Trail: Hot potato created.<br/>Must be consumed.
 
-    Bad->>Adapter: approve(&federation, &cap, &link, &request, clock, ctx)
+    Bad->>Adapter: approve(&federation, &link, &request, clock, ctx)
     Adapter->>Fed: is_attester(bad_id)?
     Fed-->>Adapter: No
     Adapter->>Fed: is_accreditor(bad_id)?
@@ -993,7 +1263,7 @@ When AA ships, the adapter changes but the component is untouched.
 
 ```mermaid
 sequenceDiagram
-    participant User as AI Account<br/>(university registrar)
+    participant User as AI Account<br/>(fisherman)
     participant Auth as AuthenticatorFunction<br/>(on-chain, custom logic)
     participant Trail as AuditTrail
     participant AA as AA Adapter
@@ -1003,7 +1273,7 @@ sequenceDiagram
 
     User->>Auth: Transaction + proof data
     Auth->>Fed: Check accreditation for sender
-    Fed-->>Auth: Valid attester for "degree_type"
+    Fed-->>Auth: Valid attester for "catch_species"
     Auth-->>User: Authentication succeeds<br/>(AuthContext populated)
 
     Note over User,Fed: PTB execution begins
