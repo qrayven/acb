@@ -1239,13 +1239,344 @@ An attacker creates a ComponentLink pointing to a trail they don't control, with
 
 **This is a critical design gap.**
 
-**Mitigation**: The trail must have a way to specify which ComponentLinks (or which federations) it trusts. Options:
+Section 13.3.5 below proposes a protocol-level mitigation.
 
-- The trail stores a `trusted_federation_id` or `trusted_link_ids` set, and `verify_and_consume` checks the approval's `authority` against the trusted set.
-- Only the trail creator can register trusted ComponentLinks (via a trail-level configuration function).
-- The ComponentLink creation requires proving authority over the target (e.g., presenting a trail-creator capability).
+### 13.3.5 Mitigation: Protocol-Level Source Binding
 
-This is a **must-fix** before the design is implemented. Without it, the authorization model is open to bypass.
+#### The Attack
+
+```mermaid
+sequenceDiagram
+    participant Attacker
+    participant Fed2 as Attacker's Federation
+    participant Link2 as Rogue ComponentLink<br/>(target: victim trail)
+    participant Trail as Victim's AuditTrail
+    participant Protocol as verify_and_consume
+
+    Note over Attacker,Protocol: Attack: create rogue governance for someone else's trail
+
+    Attacker->>Fed2: new_federation() — becomes root authority
+    Attacker->>Fed2: create_accreditation_to_attest(self, ["catch_species"])
+    Attacker->>Link2: create_component_link(fed2, victim_trail_id, ...)
+    Note right of Link2: Rogue link points to victim's trail.<br/>Nothing prevents this.
+
+    Attacker->>Trail: request_add_record(&trail, ctx)
+    Trail-->>Attacker: ActionRequest { target: trail_id }
+
+    Attacker->>Link2: approve(&fed2, &link2, &request, ...)
+    Link2-->>Attacker: ActionApproval { target: trail_id }
+    Note right of Link2: Source is rogue link,<br/>but verify_and_consume<br/>only checks target ID!
+
+    Attacker->>Trail: add_record(request, approval, malicious_data, ...)
+    Trail->>Protocol: verify_and_consume(request, approval)
+    Note over Protocol: target == target? YES<br/>No source check!
+    Protocol-->>Trail: Consumed. Operation proceeds.
+
+    Note over Trail: Malicious record added.<br/>Authorization bypassed.
+```
+
+#### Root Cause
+
+`verify_and_consume` checks that the approval's `target` matches the request's `target` — but it does NOT verify **which specific authority object** produced the approval. Any object that can call the adapter function can produce a valid-looking approval.
+
+#### Design Principle: Trust Must Come From the Protocol
+
+Following principle 4.3 (Move-Native Idioms) and the Kiosk TransferPolicy precedent: in the Kiosk pattern, a `TransferRequest<T>` can only be confirmed by the `TransferPolicy<T>` that is bound to type `T`. The binding is structural — enforced by the protocol through Move's type system. No component-level whitelist needed.
+
+The same principle applies here: **the protocol should structurally guarantee that only the legitimate authority can produce accepted approvals.** This should not require components to maintain whitelists.
+
+#### Proposed Solution: Source Binding via `&UID` Witness
+
+Two changes to the protocol, both in `tf_components::authorization`:
+
+**Change 1: ActionApproval includes an unforgeable source identity.**
+
+The approval's source is set by passing the authority object's `&UID` to the approval constructor. Since `&UID` is only accessible from within the authority object's own module (Move's field privacy), no external module can spoof it.
+
+**Change 2: ActionRequest includes the expected source identity.**
+
+The component stores which authority it trusts (a single `ID` set at creation). When creating a request, the component includes this expected source. `verify_and_consume` checks the match.
+
+#### Revised Protocol Types
+
+```move
+module tf_components::authorization;
+
+/// Created by a component at the start of a protected operation.
+/// Hot potato: no `drop`.
+public struct ActionRequest<phantom P: drop> {
+    target: ID,
+    required_permission: P,
+    requester: address,
+    /// The authority source this component trusts.
+    /// Set by the component from its stored configuration.
+    expected_source: ID,
+}
+
+/// Produced by an authority source after verifying authorization.
+/// Hot potato: no `drop`.
+public struct ActionApproval<phantom P: drop> {
+    target: ID,
+    approved_permission: P,
+    /// Unforgeable identity of the authority object that produced this.
+    /// Set by passing &UID to the constructor — cannot be spoofed.
+    source: ID,
+}
+
+/// Create a new action request with source binding.
+public fun new_request<P: drop>(
+    target: ID,
+    required_permission: P,
+    requester: address,
+    expected_source: ID,
+): ActionRequest<P> {
+    ActionRequest { target, required_permission, requester, expected_source }
+}
+
+/// Create a new action approval.
+///
+/// CRITICAL: requires `&UID` of the actual authority object.
+/// Since struct fields are private in Move, only the module that
+/// defines the authority type can access its UID.
+/// This makes the `source` field unforgeable.
+public fun new_approval<P: drop>(
+    authority_uid: &UID,
+    target: ID,
+    approved_permission: P,
+): ActionApproval<P> {
+    ActionApproval {
+        target,
+        approved_permission,
+        source: object::uid_to_inner(authority_uid),
+    }
+}
+
+/// Verify and consume. Now checks source binding.
+public fun verify_and_consume<P: drop>(
+    request: ActionRequest<P>,
+    approval: ActionApproval<P>,
+) {
+    let ActionRequest {
+        target,
+        required_permission: _,
+        requester: _,
+        expected_source,
+    } = request;
+    let ActionApproval {
+        target: approved_target,
+        approved_permission: _,
+        source,
+    } = approval;
+    assert!(target == approved_target);
+    assert!(expected_source == source);  // SOURCE BINDING CHECK
+}
+```
+
+#### Why `&UID` Makes This Unforgeable
+
+Move's field privacy is the key:
+
+```move
+// In access_controller_bridge module:
+public struct ComponentLink<phantom P: drop> has key, store {
+    id: UID,          // PRIVATE — only this module can access
+    federation_id: ID,
+    target_id: ID,
+    // ...
+}
+
+// The legitimate adapter can access link.id:
+public fun approve<P: drop + copy>(
+    federation: &Federation,
+    link: &ComponentLink<P>,    // has access to link.id
+    request: &ActionRequest<P>,
+    clock: &Clock,
+    ctx: &TxContext,
+): ActionApproval<P> {
+    // ... verify trust standing ...
+
+    // Create approval with authentic source identity.
+    // Only THIS module can access link.id (field privacy).
+    authorization::new_approval(
+        &link.id,           // &UID — proves this is the real ComponentLink
+        target,
+        *required_perm,
+    )
+}
+```
+
+A malicious adapter in a different module:
+
+```move
+// In malicious_adapter module:
+public fun fake_approve<P: drop + copy>(
+    link: &ComponentLink<P>,    // can reference the real ComponentLink
+    request: &ActionRequest<P>,
+): ActionApproval<P> {
+    // CANNOT access link.id — field is private to access_controller_bridge!
+    // CANNOT call authorization::new_approval without &UID!
+    // CANNOT construct ActionApproval directly — struct is private!
+    //
+    // No path to produce a valid approval.
+}
+```
+
+The trust chain is enforced entirely by Move's type system:
+
+```text
+                Move's field privacy
+                        │
+                        ▼
+  ComponentLink.id ──── only accessible by ──── adapter module
+        │                                            │
+        │                                            │ calls
+        ▼                                            ▼
+  &UID ──────────── required by ──────── new_approval(&UID, ...)
+                                                     │
+                                                     │ produces
+                                                     ▼
+                                           ActionApproval { source: ID }
+                                                     │
+                                    verified against │
+                                                     ▼
+                              ActionRequest { expected_source: ID }
+                                           │
+                                           │ set by component from
+                                           ▼
+                                    trail.trusted_source: ID
+                                    (set at creation time)
+```
+
+No runtime checks, no registries, no whitelists. **The type system is the trust infrastructure.**
+
+#### The Attack, Mitigated
+
+```mermaid
+sequenceDiagram
+    participant Attacker
+    participant Link2 as Rogue ComponentLink<br/>(ID: 0xDEF)
+    participant Trail as AuditTrail<br/>(trusted_source: 0xABC)
+    participant Protocol as verify_and_consume
+
+    Attacker->>Trail: request_add_record(&trail, ctx)
+    Trail-->>Attacker: ActionRequest {<br/>  target: trail_id,<br/>  expected_source: 0xABC }
+    Note right of Trail: Request includes the ID of<br/>the REAL ComponentLink (0xABC).<br/>Trail set this at creation.
+
+    Attacker->>Link2: approve(&fake_fed, &rogue_link, &request, ...)
+    Link2-->>Attacker: ActionApproval {<br/>  target: trail_id,<br/>  source: 0xDEF }
+    Note right of Link2: Rogue link can only stamp<br/>its OWN ID (0xDEF).<br/>Cannot forge 0xABC.
+
+    Attacker->>Trail: add_record(request, approval, ...)
+    Trail->>Protocol: verify_and_consume(request, approval)
+    Note over Protocol: target == target? YES<br/>expected_source == source?<br/>0xABC == 0xDEF? NO!
+    Note over Protocol: ABORT
+
+    Note over Trail: Operation rejected.<br/>Rogue ComponentLink cannot<br/>impersonate the trusted one.
+```
+
+#### Component-Side Change: Storing the Trusted Source
+
+The component needs one additional field — a pointer to its governor:
+
+```move
+public struct AuditTrail<D: store + copy> has key, store {
+    id: UID,
+    creator: address,
+    created_at: u64,
+    sequence_number: u64,
+    records: LinkedTable<u64, Record<D>>,
+    locking_config: LockingConfig,
+    immutable_metadata: Option<ImmutableMetadata>,
+    updatable_metadata: Option<String>,
+    version: u64,
+    /// The authority source this trail trusts.
+    /// Set at creation. Changeable via authorized operation.
+    trusted_source: ID,
+}
+```
+
+The `request_*` functions read this field:
+
+```move
+public fun request_add_record<D: store + copy>(
+    trail: &AuditTrail<D>,
+    ctx: &TxContext,
+): ActionRequest<Permission> {
+    authorization::new_request(
+        trail.id(),
+        permission::add_record(),
+        ctx.sender(),
+        trail.trusted_source,   // source binding
+    )
+}
+```
+
+**Is this "trust in the component"?** No. The component stores one ID — a pointer to its governor. The component does NOT validate the approval. The PROTOCOL (verify_and_consume) does. The component is like a door with a lock installed by the locksmith. The door holds the lock; the protocol turns the key.
+
+#### Changing the Trusted Source After Creation
+
+The trusted source can be updated through the authorization system itself:
+
+```move
+/// Change which authority source governs this trail.
+/// Requires authorization from the CURRENT trusted source.
+public fun update_trusted_source<D: store + copy>(
+    trail: &mut AuditTrail<D>,
+    request: ActionRequest<Permission>,
+    approval: ActionApproval<Permission>,
+    new_source: ID,
+) {
+    authorization::verify_and_consume(request, approval);
+    trail.trusted_source = new_source;
+}
+```
+
+Only the current authority can authorize changing to a new authority. This prevents hostile takeover while allowing legitimate governance transitions (e.g., migrating from one federation to another).
+
+#### Multiple Trusted Sources
+
+For components that need multiple authority sources (e.g., hierarchies + emergency freeze), the `trusted_source` field can be extended to `vector<ID>`, and `verify_and_consume` can check membership:
+
+```move
+public fun verify_and_consume_multi<P: drop>(
+    request: ActionRequest<P>,
+    approval: ActionApproval<P>,
+    trusted_sources: &vector<ID>,
+) {
+    // ... check approval.source is in trusted_sources ...
+}
+```
+
+This is a straightforward extension, proposed for a later increment if needed.
+
+#### Alignment with Design Principles
+
+| Principle | How This Satisfies It |
+| --- | --- |
+| 4.1 Separation of concerns | Component stores a pointer. Protocol enforces the binding. Adapter proves identity. Three clean layers. |
+| 4.2 Composability via PTBs | No change to PTB flow — same three-step pattern. |
+| 4.3 Move-native idioms | Uses field privacy (`&UID` witness) — the same mechanism Move uses for object identity everywhere. No runtime type checks. |
+| 4.4 Component agnosticism | Every component stores one `ID` and passes it to `new_request`. Identical pattern for any component. |
+| 4.5 Authority source agnosticism | Any authority type that can pass its `&UID` to `new_approval` works. Not tied to hierarchies. |
+| 4.7 No invented concepts | `&UID` witness is a standard Move pattern. Source binding exists in TransferPolicy. No new paradigms. |
+
+#### Why This Is the "Aesthetically Correct" Solution
+
+The Kiosk TransferPolicy binds policy to type via phantom parameter. We can't use the same mechanism (it would hardcode the authority at compile time, violating source agnosticism). But we achieve the equivalent binding at runtime through `&UID`:
+
+- **TransferPolicy**: type-level binding (static, compile-time) — "this policy governs items of type T"
+- **Source binding**: instance-level binding (dynamic, creation-time) — "this ComponentLink governs this specific trail"
+
+The static version works for kiosks because the item type is known at compile time. The dynamic version works for authorization because the governance relationship is established at deployment time. Both rely on the same principle: **the protocol structurally prevents unauthorized entities from producing accepted proofs**.
+
+The trust hierarchy is:
+
+1. Move's field privacy → guarantees `&UID` authenticity
+2. `new_approval(&UID)` → guarantees approval source authenticity
+3. `verify_and_consume` → guarantees source matches expectation
+4. Component's `trusted_source` → declares the governance relationship
+
+Trust flows from the language itself, through the protocol, to the component. Not the reverse.
 
 ### 13.4 Summary of Compliance Gaps and Recommendations
 
@@ -1258,7 +1589,7 @@ This is a **must-fix** before the design is implemented. Without it, the authori
 | 5 | ISO A.8.3 | ComponentLink permission escalation is single-key operation | High | Require multi-authority approval for permission escalation |
 | 6 | ISO A.8.15 | No audit events for ComponentLink creation/modification | High | Emit events for all configuration changes |
 | 7 | ISO A.5.29 | No emergency freeze mechanism for incident response | Medium | Add federation-wide emergency freeze flag |
-| 8 | Security | **Untrusted ComponentLink bypass** — anyone can create a ComponentLink for any trail | **Critical** | Trail must whitelist trusted federations or ComponentLinks |
+| 8 | Security | **Untrusted ComponentLink bypass** — anyone can create a ComponentLink for any trail | **Critical** | **Resolved**: Protocol-level source binding via `&UID` witness (see 13.3.5) |
 | 9 | Security | Front-running revocation allows last-moment malicious writes | Medium | Correction mechanism exists; consider time-delayed record finalization for high-security |
 | 10 | Security | No rate limiting for attester record flooding | Medium | Add per-address rate limit in adapter or at trail level |
 
@@ -1497,7 +1828,6 @@ sequenceDiagram
 
     Note over Adapter: ABORT — entity has no<br/>trust standing in federation
 
-    Note over Bad,Fed: PTB aborts. ActionRequest hot potato<br/>is never consumed. No state changes.<br/>No record added. Authorization enforced.
 ```
 
 ### C.5 Multi-Component Governance — One Federation, Multiple Components
