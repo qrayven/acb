@@ -44,7 +44,6 @@ Currently these components solve authorization independently:
 
 There is no mechanism for these authorization models to communicate. An entity accredited by a federation to attest domain properties still needs a separately-issued `Capability` from the trail's embedded `RoleMap` to add a record. The two systems exist in parallel, disconnected.
 
-**The goal**: Define a universal architectural pattern — an access controller bridge — that allows any component to accept authorization from any authority source. Hierarchies is the primary authority source today, but the pattern must not be coupled to it. It should be a reusable process flow that connects any component needing authorization with any system providing it.
 
 ---
 
