@@ -167,6 +167,8 @@ The pattern works for any shared object with protected operations: audit trails,
 
 The component stores one `trusted_source: ID`. It doesn't know or care whether the authority is a federation-backed ComponentLink, a standalone ComponentLink, or a future AA adapter. Any authority that can pass its `&UID` to `new_approval` works.
 
+This extends to the protocol types: `ActionRequest`, `ActionApproval`, and `PropertyScope` in `tf_components` use generic types (`String`, `vector<u8>`) — no dependency on hierarchies. The bridge converts to hierarchies-specific types (`PropertyName`, `PropertyValue`) at the boundary, inside `approve()`. This means `tf_components` can be shared across authority sources without coupling them to hierarchies.
+
 ### 4.6 Respect Hierarchies' Design
 
 Hierarchies models a trust chain: Root Authority → Accreditor → Attester. The **attester** is the output — the operational entity. `validate_property` is designed for attesters. The bridge uses hierarchies exactly as designed, calling only existing public APIs. No modifications to hierarchies. No new functions needed.
@@ -327,7 +329,7 @@ module audit_trail::marker {
 }
 ```
 
-The adapter is generic but only touches concrete fields:
+The adapter is generic but only touches concrete fields. It converts generic scope types to hierarchies types at the boundary:
 
 ```move
 public fun approve<P>(
@@ -340,7 +342,8 @@ public fun approve<P>(
     // Concrete fields — accessible regardless of P
     let action = request.action;
     let scope = &request.scope;
-    // ... all checks use concrete fields ...
+    // Convert String/vector<u8> → PropertyName/PropertyValue here
+    // ... validate against federation and link ...
 }
 ```
 
@@ -372,8 +375,8 @@ P was never meant to carry data. It's a type-level tag. Phantom types for taggin
 - **Compile-time type safety** between components. `ActionRequest<AuditTrailPerm>` ≠ `ActionRequest<IdentityPerm>`.
 - **One generic adapter** for all components. Written once, monomorphized per P.
 - **Direct field access** for the adapter. No generics gymnastics.
-- **Simple ComponentLink**. `VecMap<PropertyName, VecSet<u16>>` — fully concrete data structures.
-- **PropertyScope flows naturally**. Caller → ActionRequest → adapter → `validate_property`.
+- **Simple ComponentLink**. `VecMap<String, VecSet<u16>>` — fully concrete data structures.
+- **PropertyScope flows naturally**. Caller → ActionRequest → adapter converts to hierarchies types → `validate_property`.
 
 ### 7.5 What We Accept
 
@@ -388,14 +391,15 @@ P was never meant to carry data. It's a type-level tag. Phantom types for taggin
 ```move
 module tf_components::authorization;
 
-use hierarchies::property_name::PropertyName;
-use hierarchies::property_value::PropertyValue;
-
 /// The scope under which an operation is authorized.
-/// Caller provides this. Federation validates it.
+/// Caller provides this. The authority adapter validates it.
+///
+/// Uses generic types (String, vector<u8>) — no dependency on
+/// hierarchies or any specific authority source. The bridge
+/// converts to hierarchies types at the boundary.
 public struct PropertyScope has copy, drop, store {
-    property_name: PropertyName,
-    property_value: PropertyValue,
+    property_name: String,
+    property_value: vector<u8>,
 }
 
 /// Created by a component before a protected operation.
@@ -473,6 +477,14 @@ public fun verify_and_consume<P>(
     assert!(expected_source == source);  // SOURCE BINDING
 }
 
+// === Constructors ===
+
+/// Create a PropertyScope from generic types.
+/// No dependency on hierarchies — the bridge converts at the boundary.
+public fun new_scope(property_name: String, property_value: vector<u8>): PropertyScope {
+    PropertyScope { property_name, property_value }
+}
+
 // === Accessors ===
 
 public fun request_target<P>(r: &ActionRequest<P>): ID { r.target }
@@ -480,8 +492,8 @@ public fun request_action<P>(r: &ActionRequest<P>): u16 { r.action }
 public fun request_scope<P>(r: &ActionRequest<P>): &Option<PropertyScope> { &r.scope }
 public fun request_requester<P>(r: &ActionRequest<P>): address { r.requester }
 
-public fun scope_property_name(s: &PropertyScope): &PropertyName { &s.property_name }
-public fun scope_property_value(s: &PropertyScope): &PropertyValue { &s.property_value }
+public fun scope_property_name(s: &PropertyScope): &String { &s.property_name }
+public fun scope_property_value(s: &PropertyScope): &vector<u8> { &s.property_value }
 ```
 
 ### 8.2 Source Binding via `&UID` Witness
@@ -558,6 +570,7 @@ module access_controller_bridge::main;
 use tf_components::authorization::{Self, ActionRequest, ActionApproval, PropertyScope};
 use hierarchies::main::Federation;
 use hierarchies::property_name::PropertyName;
+use hierarchies::property_value::PropertyValue;
 
 /// Connects an authority source to a specific component instance.
 /// Defines which properties grant which actions, and which
@@ -575,7 +588,9 @@ public struct ComponentLink<phantom P> has key, store {
     /// Maps property names to the action codes that property scope grants.
     /// An attester accredited for property X can perform the actions in
     /// property_actions[X].
-    property_actions: VecMap<PropertyName, VecSet<u16>>,
+    /// Uses String keys — the bridge converts to PropertyName when
+    /// calling hierarchies.
+    property_actions: VecMap<String, VecSet<u16>>,
     /// Action codes reserved for root authorities (governance operations).
     /// No property scope check — root authority status is sufficient.
     governance_actions: VecSet<u16>,
@@ -629,7 +644,7 @@ This means:
 public fun create_federation_link<P>(
     federation: &Federation,
     target_id: ID,
-    property_actions: VecMap<PropertyName, VecSet<u16>>,
+    property_actions: VecMap<String, VecSet<u16>>,
     governance_actions: VecSet<u16>,
     ctx: &mut TxContext,
 ): ComponentLink<P> {
@@ -658,7 +673,7 @@ public fun create_federation_link<P>(
 /// Create a standalone ComponentLink. Creator becomes the first admin.
 public fun create_standalone_link<P>(
     target_id: ID,
-    property_actions: VecMap<PropertyName, VecSet<u16>>,
+    property_actions: VecMap<String, VecSet<u16>>,
     governance_actions: VecSet<u16>,
     ctx: &mut TxContext,
 ): ComponentLink<P> {
@@ -682,7 +697,7 @@ public fun create_standalone_link<P>(
 public fun update_property_actions<P>(
     link: &mut ComponentLink<P>,
     federation: &Federation,
-    property_actions: VecMap<PropertyName, VecSet<u16>>,
+    property_actions: VecMap<String, VecSet<u16>>,
     ctx: &TxContext,
 ) {
     assert_governor(link, federation, ctx);
@@ -782,18 +797,27 @@ public fun approve<P>(
     assert!(scope.is_some());
     let s = scope.borrow();
 
+    // Convert generic scope types to hierarchies types at the boundary.
+    // tf_components::authorization uses String/vector<u8> — hierarchies
+    // uses PropertyName/PropertyValue. The bridge is the only place
+    // that knows about both.
+    let prop_name_str = authorization::scope_property_name(s);
+    let prop_name = property_name::new(prop_name_str.bytes());
+    let prop_value = property_value::from_bytes(
+        *authorization::scope_property_value(s),
+    );
+
     // Check 1: Federation — is caller an attester for this property+value?
     assert!(federation.validate_property(
         &requester_id,
-        *authorization::scope_property_name(s),
-        *authorization::scope_property_value(s),
+        prop_name,
+        prop_value,
         clock,
     ));
 
     // Check 2: ComponentLink — does this property grant this action?
-    let prop_name = authorization::scope_property_name(s);
-    assert!(link.property_actions.contains(prop_name));
-    assert!(link.property_actions.get(prop_name).contains(&action));
+    assert!(link.property_actions.contains(prop_name_str));
+    assert!(link.property_actions.get(prop_name_str).contains(&action));
 
     authorization::new_approval<P>(&link.id, target, action, *scope)
 }
@@ -805,7 +829,9 @@ public fun approve<P>(
 
 **Check 2** (`property_actions` lookup): "Does this property grant this action?" A simple map lookup.
 
-That's it. Two checks for operational authorization. One check (`is_root_authority`) for governance.
+The bridge also converts the generic scope types (`String`, `vector<u8>`) to hierarchies types (`PropertyName`, `PropertyValue`) before these checks. This conversion is the only place in the entire system that couples to hierarchies' type system.
+
+That's it. One conversion + two checks for operational authorization. One check (`is_root_authority`) for governance.
 
 ### 10.3 Caller-Provided Scope
 
@@ -989,16 +1015,17 @@ use tf_components::authorization::{Self, ActionRequest, ActionApproval, Property
 
 /// Request authorization to add a record.
 /// Caller provides the property scope they claim to operate under.
+/// Uses generic types (String, vector<u8>) — no hierarchies dependency.
 public fun request_add_record<D: store + copy>(
     trail: &AuditTrail<D>,
-    property_name: PropertyName,
-    property_value: PropertyValue,
+    property_name: String,
+    property_value: vector<u8>,
     ctx: &TxContext,
 ): ActionRequest<AuditTrailPerm> {
     authorization::new_request<AuditTrailPerm>(
         trail.id(),
         actions::add_record(),
-        option::some(PropertyScope { property_name, property_value }),
+        option::some(authorization::new_scope(property_name, property_value)),
         ctx.sender(),
         trail.trusted_source,
     )
@@ -1366,7 +1393,7 @@ Less readable than enum variants. Mitigated by named accessor functions.
 
 ### 17.7 Accepted: Component Accepts Scope Parameters
 
-Component request functions accept PropertyName/PropertyValue. The component doesn't interpret them — it's a passthrough. The federation validates.
+Component request functions accept String/vector<u8> for property scope. The component doesn't interpret them — it's a passthrough. The bridge converts to hierarchies types and the federation validates.
 
 ### 17.8 Accepted: PTB Complexity
 
@@ -1378,7 +1405,7 @@ Three steps per operation. The explicit flow is a feature for security. SDK help
 
 The Access Controller Bridge externalizes authorization from components. Components become pure data containers. Authority sources — hierarchies federations, standalone groups, future AA adapters — decide who is authorized.
 
-The design rests on five key decisions:
+The design rests on six key decisions:
 
 1. **Attester as output**: Only attesters have operational access. `validate_property` is the only federation API needed. No modifications to hierarchies.
 
@@ -1390,9 +1417,11 @@ The design rests on five key decisions:
 
 5. **Hot potato + source binding**: Authorization cannot be skipped (hot potatoes). Authority cannot be forged (`&UID` witness). Rogue authorities are rejected (source binding).
 
+6. **Protocol layer decoupled from hierarchies**: `tf_components::authorization` uses generic types (`String`, `vector<u8>`) for property scope — no dependency on hierarchies. The bridge converts to `PropertyName`/`PropertyValue` at the boundary. This means `tf_components` is a pure protocol layer that any authority source can use, and components have zero coupling to the authority system. Upgrading or replacing hierarchies, the bridge, or a component package requires no changes to `tf_components`.
+
 The result: the entire operational authorization goes through one existing public function (`validate_property`). The ComponentLink is a simple map. The type system prevents cross-component confusion. Hot potatoes prevent bypass. Source binding prevents forgery.
 
-**The bridge is a protocol** — `ActionRequest<P>` and `ActionApproval<P>` flowing between components and authority sources within a PTB. Adapters translate; components verify; hot potatoes enforce; the type system guards.
+**The bridge is a protocol** — `ActionRequest<P>` and `ActionApproval<P>` flowing between components and authority sources within a PTB. Adapters translate (including type conversion at the hierarchies boundary); components verify; hot potatoes enforce; the type system guards.
 
 ---
 
@@ -1402,13 +1431,13 @@ The result: the entire operational authorization goes through one existing publi
 ┌─────────────────────────────────────────────────────────────────┐
 │ tf_components::authorization                                      │
 │                                                                   │
-│  PropertyScope { property_name, property_value }                  │
+│  PropertyScope { property_name: String, property_value: vec<u8> } │
 │  ActionRequest<phantom P> { target, action, scope, requester,     │
 │                             expected_source }                     │
 │  ActionApproval<phantom P> { target, action, scope, source }      │
 │  verify_and_consume()  new_request()  new_approval(&UID)          │
 │                                                                   │
-│  Concrete fields. Phantom P for type safety. Hot potatoes.        │
+│  Generic types. No hierarchies dependency. Phantom P for safety.  │
 └─────────────────────────────────────────────────────────────────┘
               │                              │
               ▼                              ▼
@@ -1429,12 +1458,13 @@ The result: the entire operational authorization goes through one existing publi
 │  ComponentLink<phantom P> {                                       │
 │    authority: Standalone { groups, admins }                        │
 │             | FederationBacked { federation_id }                   │
-│    property_actions: VecMap<PropertyName, VecSet<u16>>             │
+│    property_actions: VecMap<String, VecSet<u16>>                   │
 │    governance_actions: VecSet<u16>                                 │
 │  }                                                                │
 │                                                                   │
 │  approve(link, federation, request, clock, ctx)                   │
-│    → validate_property(scope.name, scope.value)    [federation]   │
+│    → convert String/vec<u8> → PropertyName/PropertyValue          │
+│    → validate_property(prop_name, prop_value)      [federation]   │
 │    → property_actions[scope.name].contains(action) [link]         │
 │    → new_approval(&link.id, target, action, scope)                │
 │                                                                   │
@@ -1464,18 +1494,19 @@ The result: the entire operational authorization goes through one existing publi
 ```move
 // === Single PTB ===
 
-// Step 1: Request with property scope
+// Step 1: Request with property scope (generic types — no hierarchies dependency)
 let request = audit_trail::request_add_record(
     &trail,
-    property_name::new(b"catch_logging"),
-    property_value::new_string(b"Cod"),
+    string::utf8(b"catch_logging"),
+    b"Cod",
     ctx,
 );
 
-// Step 2: Bridge validates and approves
+// Step 2: Bridge validates and approves (converts to hierarchies types internally)
 let approval = bridge::approve(&link, &federation, &request, clock, ctx);
-// 1. validate_property(fisherman, catch_logging, Cod)? YES
-// 2. property_actions["catch_logging"].contains(AddRecord)? YES
+// 1. Converts scope → PropertyName/PropertyValue
+// 2. validate_property(fisherman, catch_logging, Cod)? YES
+// 3. property_actions["catch_logging"].contains(AddRecord)? YES
 // → Approved.
 
 // Step 3: Trail consumes both
@@ -1487,8 +1518,8 @@ audit_trail::add_record(&mut trail, request, approval, data, metadata, clock, ct
 ```move
 let request = audit_trail::request_add_record(
     &trail,
-    property_name::new(b"catch_logging"),
-    property_value::new_string(b"Mackerel"),
+    string::utf8(b"catch_logging"),
+    b"Mackerel",
     ctx,
 );
 
@@ -1502,8 +1533,8 @@ let approval = bridge::approve(&link, &federation, &request, clock, ctx);
 ```move
 let request = audit_trail::request_delete_record(
     &trail, seq,
-    property_name::new(b"catch_management"),
-    property_value::new_string(b"allow_any"),
+    string::utf8(b"catch_management"),
+    b"allow_any",
     ctx,
 );
 
@@ -1543,11 +1574,11 @@ let trail = audit_trail::create(data, locking_config, metadata, clock, ctx);
 // 3. ComponentLink
 let mut prop_actions = vec_map::empty();
 prop_actions.insert(
-    property_name::new(b"catch_logging"),
+    string::utf8(b"catch_logging"),
     vec_set::from_keys(vector[actions::add_record(), actions::correct_record()]),
 );
 prop_actions.insert(
-    property_name::new(b"catch_management"),
+    string::utf8(b"catch_management"),
     vec_set::from_keys(vector[
         actions::add_record(), actions::correct_record(),
         actions::delete_record(), actions::update_metadata(),
@@ -1592,6 +1623,7 @@ sequenceDiagram
     Trail-->>Fish: ActionRequest<AuditTrailPerm><br/>{ action: 1, scope: (catch_logging, Cod),<br/>  expected_source: link_id }
 
     Fish->>Bridge: approve(&link, &fed, &request, clock, ctx)
+    Bridge->>Bridge: Convert String/bytes → PropertyName/PropertyValue
     Bridge->>Fed: validate_property(fish, catch_logging, Cod)?
     Fed-->>Bridge: YES
     Bridge->>Link: property_actions["catch_logging"].contains(1)?
