@@ -312,7 +312,7 @@ The OperationCap pattern works for any shared object with protected operations: 
 
 ### 7.5 Authority Source Agnosticism
 
-The component stores `trusted_source: ID`. It doesn't know whether the source is a federation-backed AccessControllerBridge, a standalone AccessControllerBridge, or a future AA adapter. Any authority that can produce `OperationCap<P>` with the right source ID works.
+The component stores `trusted_source: ID`. It doesn't know whether the source is an AccessControllerBridge, an AA adapter, or a future DAO governor. Any authority that can produce `OperationCap<P>` with the right source ID works. Different authorization models are different adapter objects — each with its own package and lifecycle — not variants inside a single object. The `trusted_source: ID` is the extensibility point.
 
 ### 7.6 Respect Hierarchies' Design
 
@@ -456,31 +456,17 @@ public struct AccessControllerBridge<phantom P> has key, store {
     id: UID,
     /// The component instance being governed
     target_id: ID,
-    /// How authorization is determined
-    authority: AuthorityMode,
+    /// The federation that validates trust for this bridge
+    federation_id: ID,
     /// Named capability types and their configurations.
     /// Key: capability type name (e.g., "catch_logger", "catch_manager")
     /// Value: configuration defining required properties and granted permissions
     capability_types: VecMap<String, CapabilityTypeConfig>,
-    /// Action codes reserved for governance (root authority or admin).
-    /// These require no property validation — identity check only.
+    /// Action codes reserved for governance (root authority only).
+    /// These require no property validation — root authority identity check only.
     governance_actions: VecSet<u16>,
     /// Package version for migration support
     version: u64,
-}
-
-/// How the AccessControllerBridge determines authorization.
-public enum AuthorityMode has store {
-    /// Federation-backed: delegates trust determination to a
-    /// hierarchies Federation.
-    FederationBacked {
-        federation_id: ID,
-    },
-    /// Standalone: managed directly. No federation needed.
-    Standalone {
-        groups: VecMap<String, GroupConfig>,
-        admins: VecSet<address>,
-    },
 }
 
 /// Configuration for a named capability type.
@@ -496,13 +482,6 @@ public struct CapabilityTypeConfig has copy, drop, store {
     /// Action codes granted by this capability type.
     /// These become the OperationCap's permissions.
     granted_permissions: VecSet<u16>,
-}
-
-/// A named group of addresses sharing the same action permissions.
-/// Used in Standalone mode.
-public struct GroupConfig has copy, drop, store {
-    members: VecSet<address>,
-    actions: VecSet<u16>,
 }
 ```
 
@@ -632,16 +611,19 @@ A rogue AccessControllerBridge can only stamp its own ID. It cannot forge the tr
 ```move
 /// Emitted when an AccessControllerBridge is created
 public struct AccessControllerBridgeCreated has copy, drop {
-    extender_id: ID,
+    bridge_id: ID,
     target_id: ID,
-    federation_id: Option<ID>,
+    federation_id: ID,
     created_by: address,
     capability_type_names: vector<String>,
 }
 
-/// Emitted when a capability is borrowed
+/// Emitted when a capability is borrowed.
+/// The validated_scope field is the authoritative audit record of
+/// what properties were checked — this is where scope lives,
+/// not in the OperationCap.
 public struct CapabilityBorrowed has copy, drop {
-    extender_id: ID,
+    bridge_id: ID,
     target_id: ID,
     capability_type: String,
     holder: address,
@@ -651,7 +633,7 @@ public struct CapabilityBorrowed has copy, drop {
 
 /// Emitted when a capability is returned
 public struct CapabilityReturned has copy, drop {
-    extender_id: ID,
+    bridge_id: ID,
     target_id: ID,
     holder: address,
     timestamp: u64,
@@ -659,7 +641,7 @@ public struct CapabilityReturned has copy, drop {
 
 /// Emitted when a governance capability is borrowed
 public struct GovernanceCapBorrowed has copy, drop {
-    extender_id: ID,
+    bridge_id: ID,
     target_id: ID,
     action: u16,
     holder: address,
@@ -668,14 +650,14 @@ public struct GovernanceCapBorrowed has copy, drop {
 
 /// Emitted when the AccessControllerBridge configuration is updated
 public struct AccessControllerBridgeUpdated has copy, drop {
-    extender_id: ID,
+    bridge_id: ID,
     updated_by: address,
     change_type: String,
 }
 
 /// Emitted when the AccessControllerBridge is deleted
 public struct AccessControllerBridgeDeleted has copy, drop {
-    extender_id: ID,
+    bridge_id: ID,
     deleted_by: address,
 }
 ```
@@ -741,9 +723,9 @@ let trail = audit_trail::create(
 ### 8.4 Step 3: Create the AccessControllerBridge
 
 ```move
-/// Create a new federation-backed AccessControllerBridge.
+/// Create a new AccessControllerBridge.
 /// Only callable by a root authority of the specified federation.
-public fun create_federation_extender<P>(
+public fun create<P>(
     federation: &Federation,
     target_id: ID,
     capability_types: VecMap<String, CapabilityTypeConfig>,
@@ -755,26 +737,24 @@ public fun create_federation_extender<P>(
     let sender_id = ctx.sender().to_id();
     assert!(federation.is_root_authority(&sender_id));
 
-    let extender = AccessControllerBridge {
+    let bridge = AccessControllerBridge {
         id: object::new(ctx),
         target_id,
-        authority: AuthorityMode::FederationBacked {
-            federation_id: federation.federation_id(),
-        },
+        federation_id: federation.federation_id(),
         capability_types,
         governance_actions,
         version: PACKAGE_VERSION,
     };
 
     event::emit(AccessControllerBridgeCreated {
-        extender_id: object::uid_to_inner(&extender.id),
+        bridge_id: object::uid_to_inner(&bridge.id),
         target_id,
-        federation_id: option::some(federation.federation_id()),
+        federation_id: federation.federation_id(),
         created_by: ctx.sender(),
         capability_type_names: capability_types.keys(),
     });
 
-    extender
+    bridge
 }
 ```
 
@@ -816,7 +796,7 @@ let gov_actions = vec_set::from_keys(vector[
 ]);
 
 // Create the AccessControllerBridge
-let extender = access_controller_bridge::create_federation_extender<AuditTrailPerm>(
+let bridge = access_controller_bridge::create<AuditTrailPerm>(
     &federation, trail_id, cap_types, gov_actions, clock, ctx,
 );
 ```
@@ -837,10 +817,10 @@ public fun set_trusted_source<D: store + copy>(
 ```
 
 ```move
-// Bind trail to extender
+// Bind trail to bridge
 audit_trail::set_trusted_source(
     &mut trail,
-    object::id(&extender),
+    object::id(&bridge),
     ctx,
 );
 ```
@@ -924,7 +904,7 @@ sequenceDiagram
     RA->>Trail: create(data, locking_config, ...)
     Note right of Trail: Trail is inert until<br/>trusted_source is set
 
-    RA->>AE: create_federation_extender(<br/>  capability_types: {<br/>    "catch_logger" → {<br/>      required: [catch_logging],<br/>      grants: {AddRecord, CorrectRecord}<br/>    },<br/>    "catch_manager" → {<br/>      required: [catch_logging, catch_management],<br/>      grants: {+DeleteRecord, UpdateMetadata, ...}<br/>    }<br/>  },<br/>  governance: {DeleteTrail, Migrate})
+    RA->>AE: create(<br/>  capability_types: {<br/>    "catch_logger" → {<br/>      required: [catch_logging],<br/>      grants: {AddRecord, CorrectRecord}<br/>    },<br/>    "catch_manager" → {<br/>      required: [catch_logging, catch_management],<br/>      grants: {+DeleteRecord, UpdateMetadata, ...}<br/>    }<br/>  },<br/>  governance: {DeleteTrail, Migrate})
     AE-->>RA: AccessControllerBridge created
 
     RA->>Trail: set_trusted_source(extender_id)
@@ -940,7 +920,7 @@ sequenceDiagram
 
 ## 9. Process: Authorization (Borrow–Use–Return)
 
-### 9.1 The Borrow Step (Federation-Backed)
+### 9.1 The Borrow Step
 
 ```move
 /// Borrow an OperationCap by providing a capability type and
@@ -956,25 +936,21 @@ sequenceDiagram
 /// The returned OperationCap is a hot potato — MUST be returned
 /// via return_cap() within the same PTB.
 public fun borrow<P>(
-    extender: &AccessControllerBridge<P>,
+    bridge: &AccessControllerBridge<P>,
     federation: &Federation,
     capability_type: String,
     property_values: VecMap<String, vector<u8>>,
     clock: &Clock,
     ctx: &TxContext,
 ): OperationCap<P> {
-    assert!(extender.version == PACKAGE_VERSION);
+    assert!(bridge.version == PACKAGE_VERSION);
 
     // 1. Look up capability type
-    assert!(extender.capability_types.contains(&capability_type));
-    let config = extender.capability_types.get(&capability_type);
+    assert!(bridge.capability_types.contains(&capability_type));
+    let config = bridge.capability_types.get(&capability_type);
 
     // 2. Verify federation matches
-    let federation_id = match (&extender.authority) {
-        AuthorityMode::FederationBacked { federation_id } => *federation_id,
-        _ => abort,  // Use borrow_standalone for standalone mode
-    };
-    assert!(federation_id == federation.federation_id());
+    assert!(bridge.federation_id == federation.federation_id());
 
     // 3. Build hierarchies-typed properties for validation
     let required = &config.required_properties;
@@ -1001,11 +977,10 @@ public fun borrow<P>(
         clock,
     ));
 
-    // 5. Issue the OperationCap
     // 5. Issue the OperationCap (minimal — no scope, just permissions)
     let cap = operation_cap::new<P>(
-        &extender.id,
-        extender.target_id,
+        &bridge.id,
+        bridge.target_id,
         config.granted_permissions,
         ctx.sender(),
     );
@@ -1015,8 +990,8 @@ public fun borrow<P>(
     // This keeps the protocol token free of domain knowledge while
     // providing full traceability for auditors.
     event::emit(CapabilityBorrowed {
-        extender_id: object::uid_to_inner(&extender.id),
-        target_id: extender.target_id,
+        bridge_id: object::uid_to_inner(&bridge.id),
+        target_id: bridge.target_id,
         capability_type,
         holder: ctx.sender(),
         validated_scope: property_values,
@@ -1047,23 +1022,19 @@ Governance operations don't go through capability types — they check root auth
 /// Borrow an OperationCap for a governance action.
 /// Only root authorities of the linked federation can borrow governance caps.
 public fun borrow_governance<P>(
-    extender: &AccessControllerBridge<P>,
+    bridge: &AccessControllerBridge<P>,
     federation: &Federation,
     action: u16,
     clock: &Clock,
     ctx: &TxContext,
 ): OperationCap<P> {
-    assert!(extender.version == PACKAGE_VERSION);
+    assert!(bridge.version == PACKAGE_VERSION);
 
     // Verify this is a governance action
-    assert!(extender.governance_actions.contains(&action));
+    assert!(bridge.governance_actions.contains(&action));
 
     // Verify federation matches
-    let federation_id = match (&extender.authority) {
-        AuthorityMode::FederationBacked { federation_id } => *federation_id,
-        _ => abort,
-    };
-    assert!(federation_id == federation.federation_id());
+    assert!(bridge.federation_id == federation.federation_id());
 
     // Verify caller is root authority
     let requester_id = ctx.sender().to_id();
@@ -1074,15 +1045,15 @@ public fun borrow_governance<P>(
     permissions.insert(action);
 
     let cap = operation_cap::new<P>(
-        &extender.id,
-        extender.target_id,
+        &bridge.id,
+        bridge.target_id,
         permissions,
         ctx.sender(),
     );
 
     event::emit(GovernanceCapBorrowed {
-        extender_id: object::uid_to_inner(&extender.id),
-        target_id: extender.target_id,
+        bridge_id: object::uid_to_inner(&bridge.id),
+        target_id: bridge.target_id,
         action,
         holder: ctx.sender(),
         timestamp: clock::timestamp_ms(clock),
@@ -1152,21 +1123,21 @@ The trail is a **pure data component** — records, locking, events. No embedded
 /// The OperationCap has no `drop` ability — the transaction aborts
 /// if this is not called.
 public fun return_cap<P>(
-    extender: &AccessControllerBridge<P>,
+    bridge: &AccessControllerBridge<P>,
     cap: OperationCap<P>,
     clock: &Clock,
 ) {
     let holder = operation_cap::holder(&cap);
 
     event::emit(CapabilityReturned {
-        extender_id: object::uid_to_inner(&extender.id),
-        target_id: extender.target_id,
+        bridge_id: object::uid_to_inner(&bridge.id),
+        target_id: bridge.target_id,
         holder,
         timestamp: clock::timestamp_ms(clock),
     });
 
     // Destroy the hot potato — verifies source matches
-    operation_cap::destroy(&extender.id, cap);
+    operation_cap::destroy(&bridge.id, cap);
 }
 ```
 
@@ -1182,7 +1153,7 @@ let mut prop_values = vec_map::empty();
 prop_values.insert(string::utf8(b"catch_logging"), b"Cod");
 
 let cap = access_controller_bridge::borrow(
-    &extender,
+    &bridge,
     &federation,
     string::utf8(b"catch_logger"),
     prop_values,
@@ -1202,7 +1173,7 @@ audit_trail::add_record(
 );
 
 // Step 3: Return capability to AccessControllerBridge
-access_controller_bridge::return_cap(&extender, cap, clock);
+access_controller_bridge::return_cap(&bridge, cap, clock);
 // cap is consumed (destroyed) — hot potato fulfilled
 ```
 
@@ -1214,7 +1185,7 @@ Since the cap is passed by reference, the user can perform **multiple operations
 
 ```move
 let cap = access_controller_bridge::borrow(
-    &extender, &federation,
+    &bridge, &federation,
     string::utf8(b"catch_manager"),     // has multiple permissions
     prop_values, clock, ctx,
 );
@@ -1225,128 +1196,10 @@ audit_trail::add_record(&mut trail, &cap, data2, metadata2, clock, ctx);
 audit_trail::correct_record(&mut trail, &cap, seq, data3, clock, ctx);
 audit_trail::update_metadata(&mut trail, &cap, new_metadata, ctx);
 
-access_controller_bridge::return_cap(&extender, cap, clock);
+access_controller_bridge::return_cap(&bridge, cap, clock);
 ```
 
 This is more efficient than v2's model where each operation needed its own ActionRequest + ActionApproval pair.
-
-### 9.7 Standalone Mode
-
-For simple scenarios without a federation:
-
-```move
-/// Borrow an OperationCap in standalone mode.
-/// Checks sender against groups. No federation needed.
-public fun borrow_standalone<P>(
-    extender: &AccessControllerBridge<P>,
-    capability_type: String,
-    clock: &Clock,
-    ctx: &TxContext,
-): OperationCap<P> {
-    assert!(extender.version == PACKAGE_VERSION);
-    assert!(extender.capability_types.contains(&capability_type));
-    let config = extender.capability_types.get(&capability_type);
-
-    let requester = ctx.sender();
-
-    let (groups, _admins) = match (&extender.authority) {
-        AuthorityMode::Standalone { groups, admins } => (groups, admins),
-        _ => abort,
-    };
-
-    // Check if requester is in any group that grants
-    // all required permissions for this capability type
-    let group_names = groups.keys();
-    let mut authorized = false;
-    let mut i = 0;
-    while (i < group_names.length()) {
-        let group = groups.get(&group_names[i]);
-        if (group.members.contains(&requester)) {
-            // Check if this group's actions are a superset of granted_permissions
-            let required = &config.granted_permissions;
-            let mut all_present = true;
-            let perm_keys = required.into_keys();
-            let mut j = 0;
-            while (j < perm_keys.length()) {
-                if (!group.actions.contains(&perm_keys[j])) {
-                    all_present = false;
-                    break
-                };
-                j = j + 1;
-            };
-            if (all_present) {
-                authorized = true;
-                break
-            };
-        };
-        i = i + 1;
-    };
-
-    assert!(authorized);
-
-    let cap = operation_cap::new<P>(
-        &extender.id,
-        extender.target_id,
-        config.granted_permissions,
-        requester,
-    );
-
-    event::emit(CapabilityBorrowed {
-        extender_id: object::uid_to_inner(&extender.id),
-        target_id: extender.target_id,
-        capability_type,
-        holder: requester,
-        validated_scope: vec_map::empty(),
-        timestamp: clock::timestamp_ms(clock),
-    });
-
-    cap
-}
-```
-
-Standalone mode ignores property validation — there's no federation. Group membership determines access. If you need property-level scoping, use a federation.
-
-### 9.8 Standalone Governance
-
-```move
-/// Borrow a governance cap in standalone mode. Admin only.
-public fun borrow_governance_standalone<P>(
-    extender: &AccessControllerBridge<P>,
-    action: u16,
-    clock: &Clock,
-    ctx: &TxContext,
-): OperationCap<P> {
-    assert!(extender.version == PACKAGE_VERSION);
-    assert!(extender.governance_actions.contains(&action));
-
-    let requester = ctx.sender();
-    let admins = match (&extender.authority) {
-        AuthorityMode::Standalone { admins, .. } => admins,
-        _ => abort,
-    };
-    assert!(admins.contains(&requester));
-
-    let mut permissions = vec_set::empty();
-    permissions.insert(action);
-
-    let cap = operation_cap::new<P>(
-        &extender.id,
-        extender.target_id,
-        permissions,
-        requester,
-    );
-
-    event::emit(GovernanceCapBorrowed {
-        extender_id: object::uid_to_inner(&extender.id),
-        target_id: extender.target_id,
-        action,
-        holder: requester,
-        timestamp: clock::timestamp_ms(clock),
-    });
-
-    cap
-}
-```
 
 ---
 
@@ -1358,23 +1211,23 @@ Root authorities can update what a capability type requires and grants:
 
 ```move
 /// Update an existing capability type configuration.
-/// Federation-backed: only root authority. Standalone: only admin.
+/// Only callable by a root authority of the linked federation.
 public fun update_capability_type<P>(
-    extender: &mut AccessControllerBridge<P>,
+    bridge: &mut AccessControllerBridge<P>,
     federation: &Federation,
     capability_type: String,
     new_config: CapabilityTypeConfig,
     ctx: &TxContext,
 ) {
-    assert_governor(extender, federation, ctx);
-    assert!(extender.capability_types.contains(&capability_type));
+    assert_root_authority(bridge, federation, ctx);
+    assert!(bridge.capability_types.contains(&capability_type));
 
     // Replace the config
-    extender.capability_types.remove(&capability_type);
-    extender.capability_types.insert(capability_type, new_config);
+    bridge.capability_types.remove(&capability_type);
+    bridge.capability_types.insert(capability_type, new_config);
 
     event::emit(AccessControllerBridgeUpdated {
-        extender_id: object::uid_to_inner(&extender.id),
+        bridge_id: object::uid_to_inner(&bridge.id),
         updated_by: ctx.sender(),
         change_type: string::utf8(b"update_capability_type"),
     });
@@ -1396,7 +1249,7 @@ let updated_config = capability_type_config::new(
 );
 
 access_controller_bridge::update_capability_type(
-    &mut extender,
+    &mut bridge,
     &federation,
     string::utf8(b"catch_logger"),
     updated_config,
@@ -1409,18 +1262,18 @@ access_controller_bridge::update_capability_type(
 ```move
 /// Add a new capability type to the AccessControllerBridge.
 public fun add_capability_type<P>(
-    extender: &mut AccessControllerBridge<P>,
+    bridge: &mut AccessControllerBridge<P>,
     federation: &Federation,
     capability_type: String,
     config: CapabilityTypeConfig,
     ctx: &TxContext,
 ) {
-    assert_governor(extender, federation, ctx);
-    assert!(!extender.capability_types.contains(&capability_type));
-    extender.capability_types.insert(capability_type, config);
+    assert_root_authority(bridge, federation, ctx);
+    assert!(!bridge.capability_types.contains(&capability_type));
+    bridge.capability_types.insert(capability_type, config);
 
     event::emit(AccessControllerBridgeUpdated {
-        extender_id: object::uid_to_inner(&extender.id),
+        bridge_id: object::uid_to_inner(&bridge.id),
         updated_by: ctx.sender(),
         change_type: string::utf8(b"add_capability_type"),
     });
@@ -1428,17 +1281,17 @@ public fun add_capability_type<P>(
 
 /// Remove a capability type from the AccessControllerBridge.
 public fun remove_capability_type<P>(
-    extender: &mut AccessControllerBridge<P>,
+    bridge: &mut AccessControllerBridge<P>,
     federation: &Federation,
     capability_type: String,
     ctx: &TxContext,
 ) {
-    assert_governor(extender, federation, ctx);
-    assert!(extender.capability_types.contains(&capability_type));
-    extender.capability_types.remove(&capability_type);
+    assert_root_authority(bridge, federation, ctx);
+    assert!(bridge.capability_types.contains(&capability_type));
+    bridge.capability_types.remove(&capability_type);
 
     event::emit(AccessControllerBridgeUpdated {
-        extender_id: object::uid_to_inner(&extender.id),
+        bridge_id: object::uid_to_inner(&bridge.id),
         updated_by: ctx.sender(),
         change_type: string::utf8(b"remove_capability_type"),
     });
@@ -1450,90 +1303,23 @@ public fun remove_capability_type<P>(
 ```move
 /// Update the set of governance actions.
 public fun update_governance_actions<P>(
-    extender: &mut AccessControllerBridge<P>,
+    bridge: &mut AccessControllerBridge<P>,
     federation: &Federation,
     governance_actions: VecSet<u16>,
     ctx: &TxContext,
 ) {
-    assert_governor(extender, federation, ctx);
-    extender.governance_actions = governance_actions;
+    assert_root_authority(bridge, federation, ctx);
+    bridge.governance_actions = governance_actions;
 
     event::emit(AccessControllerBridgeUpdated {
-        extender_id: object::uid_to_inner(&extender.id),
+        bridge_id: object::uid_to_inner(&bridge.id),
         updated_by: ctx.sender(),
         change_type: string::utf8(b"update_governance_actions"),
     });
 }
 ```
 
-### 10.4 Standalone Permission Management
-
-```move
-/// Add a member to a standalone group. Admin only.
-public fun add_group_member<P>(
-    extender: &mut AccessControllerBridge<P>,
-    group_name: String,
-    member: address,
-    ctx: &TxContext,
-) {
-    assert_standalone_admin(extender, ctx.sender());
-    match (&mut extender.authority) {
-        AuthorityMode::Standalone { groups, .. } => {
-            groups.get_mut(&group_name).members.insert(member);
-        },
-        _ => abort,
-    };
-}
-
-/// Remove a member from a standalone group. Admin only.
-public fun remove_group_member<P>(
-    extender: &mut AccessControllerBridge<P>,
-    group_name: String,
-    member: address,
-    ctx: &TxContext,
-) {
-    assert_standalone_admin(extender, ctx.sender());
-    match (&mut extender.authority) {
-        AuthorityMode::Standalone { groups, .. } => {
-            groups.get_mut(&group_name).members.remove(&member);
-        },
-        _ => abort,
-    };
-}
-```
-
-Revocation is immediate — remove an address, their next `borrow_standalone()` fails.
-
-### 10.5 Migration: Standalone → Federation
-
-One-way upgrade:
-
-```move
-/// Upgrade to federation-backed mode.
-/// Caller must be standalone admin AND federation root authority.
-public fun upgrade_to_federation<P>(
-    extender: &mut AccessControllerBridge<P>,
-    federation: &Federation,
-    ctx: &TxContext,
-) {
-    assert_standalone_admin(extender, ctx.sender());
-    assert!(federation.is_root_authority(&ctx.sender().to_id()));
-
-    extender.authority = AuthorityMode::FederationBacked {
-        federation_id: federation.federation_id(),
-    };
-
-    event::emit(AccessControllerBridgeUpdated {
-        extender_id: object::uid_to_inner(&extender.id),
-        updated_by: ctx.sender(),
-        change_type: string::utf8(b"upgrade_to_federation"),
-    });
-}
-```
-
-The target component is untouched — same `trusted_source: ID`.
-
-### 10.6 Upgrading the AccessControllerBridge Package
+### 10.4 Upgrading the AccessControllerBridge Package
 
 When the `access_controller_bridge` package is upgraded (new version published):
 
@@ -1544,22 +1330,22 @@ When the `access_controller_bridge` package is upgraded (new version published):
 
 ```move
 /// Migrate the AccessControllerBridge to the new package version.
-/// Only governance (root authority / admin) can migrate.
+/// Only root authority can migrate.
 public fun migrate<P>(
-    extender: &mut AccessControllerBridge<P>,
+    bridge: &mut AccessControllerBridge<P>,
     federation: &Federation,
     ctx: &TxContext,
 ) {
-    assert_governor(extender, federation, ctx);
-    assert!(extender.version < PACKAGE_VERSION);
+    assert_root_authority(bridge, federation, ctx);
+    assert!(bridge.version < PACKAGE_VERSION);
 
     // Perform any structural migration here
     // e.g., add new fields via dynamic fields
 
-    extender.version = PACKAGE_VERSION;
+    bridge.version = PACKAGE_VERSION;
 
     event::emit(AccessControllerBridgeUpdated {
-        extender_id: object::uid_to_inner(&extender.id),
+        bridge_id: object::uid_to_inner(&bridge.id),
         updated_by: ctx.sender(),
         change_type: string::utf8(b"migrate"),
     });
@@ -1568,7 +1354,7 @@ public fun migrate<P>(
 
 **During migration downtime**: Between package upgrade and object migration, `borrow()` calls fail (`version != PACKAGE_VERSION`). This is a deliberate safety gate — the governance must explicitly migrate the object to the new version.
 
-### 10.7 Upgrading the Audit Trail Package
+### 10.5 Upgrading the Audit Trail Package
 
 When the `audit_trail` package is upgraded:
 
@@ -1588,7 +1374,7 @@ When the `audit_trail` package is upgraded:
 
 Steps 2 and 3 can happen in separate PTBs. Between steps 2 and 3, the new operation exists but no capability type grants it — secure by default.
 
-### 10.8 Upgrading the Hierarchies Package
+### 10.6 Upgrading the Hierarchies Package
 
 When the `hierarchies` package is upgraded:
 
@@ -1608,7 +1394,7 @@ When the `hierarchies` package is upgraded:
 5. System is live with new hierarchies
 ```
 
-### 10.9 Upgrading tf_components (Protocol Layer)
+### 10.7 Upgrading tf_components (Protocol Layer)
 
 This is the most impactful upgrade — `OperationCap` lives here.
 
@@ -1618,7 +1404,7 @@ This is the most impactful upgrade — `OperationCap` lives here.
 
 **Mitigation**: `tf_components` should be treated as the most stable layer. Changes to `OperationCap` should be extremely rare and backward-compatible where possible.
 
-### 10.10 Replacing an AccessControllerBridge Instance
+### 10.8 Replacing an AccessControllerBridge Instance
 
 If the AccessControllerBridge object itself needs to be replaced (not just upgraded):
 
@@ -1640,7 +1426,7 @@ If the AccessControllerBridge object itself needs to be replaced (not just upgra
 
 However, dual trusted_source adds complexity. For most scenarios, the brief interruption during `set_trusted_source` is acceptable.
 
-### 10.11 Version Compatibility Matrix
+### 10.9 Version Compatibility Matrix
 
 ```text
 ┌─────────────────────┬──────────────────────┬────────────┬───────────────┬───────────────┐
@@ -1717,7 +1503,7 @@ The audit trail is **completely unaware** of how authorization works. It stores 
 - Hierarchies or federations
 - Properties or attestations
 - Capability types or mappings
-- Whether the AccessControllerBridge is federation-backed or standalone
+- Whether the authority source is an AccessControllerBridge, an AA adapter, or something else
 
 The trail is a **pure data component**.
 
@@ -1743,7 +1529,7 @@ Add or remove accreditations for different properties. Immediate effect. The nex
 
 ### 12.4 Changing the Permission Mapping
 
-Update capability type configurations on the AccessControllerBridge. Only root authorities (federation) or admins (standalone) can do this. Immediately effective.
+Update capability type configurations on the AccessControllerBridge. Only root authorities can do this. Immediately effective.
 
 ### 12.5 Promoting / Demoting
 
@@ -1988,22 +1774,22 @@ The `CapabilityBorrowed` event includes `validated_scope` — the property names
 
 ```move
 public fun freeze<P>(
-    extender: &mut AccessControllerBridge<P>,
+    bridge: &mut AccessControllerBridge<P>,
     federation: &Federation,
     ctx: &TxContext,
 ) {
-    assert_governor(extender, federation, ctx);
-    extender.frozen = true;
+    assert_root_authority(bridge, federation, ctx);
+    bridge.frozen = true;
     event::emit(AccessControllerBridgeFrozen { ... });
 }
 
 public fun unfreeze<P>(
-    extender: &mut AccessControllerBridge<P>,
+    bridge: &mut AccessControllerBridge<P>,
     federation: &Federation,
     ctx: &TxContext,
 ) {
-    assert_governor(extender, federation, ctx);
-    extender.frozen = false;
+    assert_root_authority(bridge, federation, ctx);
+    bridge.frozen = false;
     event::emit(AccessControllerBridgeUnfrozen { ... });
 }
 ```
@@ -2070,11 +1856,11 @@ Borrow–Use–Return is three calls per PTB. The explicit flow is a feature for
 
 ```typescript
 // SDK helper
-async function addRecord(trail, extender, federation, capType, propValues, data) {
+async function addRecord(trail, bridge, federation, capType, propValues, data) {
   const tx = new PTB();
-  const cap = tx.moveCall("access_controller_bridge::borrow", [extender, federation, capType, propValues, clock]);
+  const cap = tx.moveCall("access_controller_bridge::borrow", [bridge, federation, capType, propValues, clock]);
   tx.moveCall("audit_trail::add_record", [trail, cap, data, metadata, clock]);
-  tx.moveCall("access_controller_bridge::return_cap", [extender, cap, clock]);
+  tx.moveCall("access_controller_bridge::return_cap", [bridge, cap, clock]);
   return tx.execute();
 }
 ```
@@ -2113,7 +1899,7 @@ The design rests on six key decisions:
 
 5. **Component simplicity**: The target component receives `&OperationCap`, checks permissions and source. It knows nothing about hierarchies, federations, properties, or the AccessControllerBridge's internals. Pure data store with permission checks.
 
-6. **Protocol layer decoupled from hierarchies**: `tf_components::operation_cap` contains no domain knowledge — just `target`, `permissions`, `holder`, `source`. No property names, no property values, no dependency on hierarchies. The AccessControllerBridge converts hierarchies types internally and captures validated scope in events. This means `tf_components` is a pure protocol layer, and components have zero coupling to the authority system. Any authority adapter (federation-backed, standalone, AA) that can produce `OperationCap` with the right source works.
+6. **Protocol layer decoupled from hierarchies**: `tf_components::operation_cap` contains no domain knowledge — just `target`, `permissions`, `holder`, `source`. No property names, no property values, no dependency on hierarchies. The AccessControllerBridge converts hierarchies types internally and captures validated scope in events. This means `tf_components` is a pure protocol layer, and components have zero coupling to the authority system. Any authority adapter (AccessControllerBridge, AA adapter, future DAO governor) that can produce `OperationCap` with the right source works.
 
 **The AccessControllerBridge is the single translation layer** between the world of trust (hierarchies) and the world of operations (components). It transforms "you are accredited to attest about X" into "you may perform actions Y on component Z" — within a single PTB, with full on-chain traceability, and with immediate revocation through live federation state checks.
 
@@ -2164,22 +1950,21 @@ The design rests on six key decisions:
 ┌─────────────────────────────────────────────────────────────────────┐
 │ access_controller_bridge::main                                                    │
 │                                                                       │
-│  AccessControllerBridge<phantom P> {                                            │
+│  AccessControllerBridge<phantom P> {                                  │
 │    target_id: ID,                                                     │
-│    authority: FederationBacked { federation_id }                      │
-│              | Standalone { groups, admins },                         │
+│    federation_id: ID,                                                 │
 │    capability_types: VecMap<String, CapabilityTypeConfig>,            │
 │    governance_actions: VecSet<u16>,                                   │
 │  }                                                                    │
 │                                                                       │
-│  borrow(extender, federation, cap_type, prop_values, clock, ctx)     │
+│  borrow(bridge, federation, cap_type, prop_values, clock, ctx)       │
 │    → look up capability type config                                  │
 │    → convert String/vec<u8> → PropertyName/PropertyValue             │
 │    → validate_properties(names, values)           [federation call]  │
-│    → operation_cap::new(&extender.id, ...)        [issue cap]        │
+│    → operation_cap::new(&bridge.id, ...)          [issue cap]        │
 │                                                                       │
-│  return_cap(extender, cap, clock)                                    │
-│    → operation_cap::destroy(&extender.id, cap)    [consume cap]      │
+│  return_cap(bridge, cap, clock)                                      │
+│    → operation_cap::destroy(&bridge.id, cap)      [consume cap]      │
 │                                                                       │
 │  One adapter. All components. Phantom P flows through.               │
 └──────────────────────────────┬────────────────────────────────────────┘
@@ -2210,7 +1995,7 @@ let mut props = vec_map::empty();
 props.insert(string::utf8(b"catch_logging"), b"Cod");
 
 let cap = access_controller_bridge::borrow(
-    &extender,
+    &bridge,
     &federation,
     string::utf8(b"catch_logger"),
     props,
@@ -2228,7 +2013,7 @@ audit_trail::add_record(&mut trail, &cap, catch_data, metadata, clock, ctx);
 // Trail checks: target ✓, source ✓, has_permission(AddRecord) ✓, holder ✓
 
 // Step 3: Return capability
-access_controller_bridge::return_cap(&extender, cap, clock);
+access_controller_bridge::return_cap(&bridge, cap, clock);
 ```
 
 ### B.2 Fisherman Tries Mackerel (Not Accredited)
@@ -2238,7 +2023,7 @@ let mut props = vec_map::empty();
 props.insert(string::utf8(b"catch_logging"), b"Mackerel");
 
 let cap = access_controller_bridge::borrow(
-    &extender, &federation,
+    &bridge, &federation,
     string::utf8(b"catch_logger"),
     props, clock, ctx,
 );
@@ -2254,7 +2039,7 @@ props.insert(string::utf8(b"catch_logging"), b"allow_any");
 props.insert(string::utf8(b"catch_management"), b"allow_any");
 
 let cap = access_controller_bridge::borrow(
-    &extender, &federation,
+    &bridge, &federation,
     string::utf8(b"catch_manager"),
     props, clock, ctx,
 );
@@ -2265,14 +2050,14 @@ let cap = access_controller_bridge::borrow(
 audit_trail::delete_record(&mut trail, &cap, seq, clock, ctx);
 // has_permission(DeleteRecord) ✓
 
-access_controller_bridge::return_cap(&extender, cap, clock);
+access_controller_bridge::return_cap(&bridge, cap, clock);
 ```
 
 ### B.4 Maritime Authority Deletes a Trail
 
 ```move
 let cap = access_controller_bridge::borrow_governance(
-    &extender, &federation,
+    &bridge, &federation,
     actions::delete_audit_trail(),
     clock, ctx,
 );
@@ -2281,7 +2066,7 @@ let cap = access_controller_bridge::borrow_governance(
 
 audit_trail::delete_trail(trail, &cap, clock, ctx);
 
-access_controller_bridge::return_cap(&extender, cap, clock);
+access_controller_bridge::return_cap(&bridge, cap, clock);
 ```
 
 ### B.5 Multiple Operations in One PTB
@@ -2291,7 +2076,7 @@ let mut props = vec_map::empty();
 props.insert(string::utf8(b"catch_logging"), b"Cod");
 
 let cap = access_controller_bridge::borrow(
-    &extender, &federation,
+    &bridge, &federation,
     string::utf8(b"catch_logger"),
     props, clock, ctx,
 );
@@ -2301,7 +2086,7 @@ audit_trail::add_record(&mut trail, &cap, catch_data_1, metadata1, clock, ctx);
 audit_trail::add_record(&mut trail, &cap, catch_data_2, metadata2, clock, ctx);
 audit_trail::correct_record(&mut trail, &cap, seq, corrected_data, clock, ctx);
 
-access_controller_bridge::return_cap(&extender, cap, clock);
+access_controller_bridge::return_cap(&bridge, cap, clock);
 ```
 
 ### B.6 Full Bootstrap
@@ -2335,12 +2120,12 @@ let gov_actions = vec_set::from_keys(vector[
     actions::delete_audit_trail(), actions::migrate(),
 ]);
 
-let extender = access_controller_bridge::create_federation_extender<AuditTrailPerm>(
+let bridge = access_controller_bridge::create<AuditTrailPerm>(
     &federation, trail.id(), cap_types, gov_actions, clock, ctx,
 );
 
-// 4. Bind trail to extender
-audit_trail::set_trusted_source(&mut trail, object::id(&extender), ctx);
+// 4. Bind trail to bridge
+audit_trail::set_trusted_source(&mut trail, object::id(&bridge), ctx);
 
 // 5. Accredit participants
 hierarchies::accredit_to_attest(&mut federation, fisherman_a,
