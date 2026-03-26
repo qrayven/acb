@@ -1,4 +1,4 @@
-# Access Controller Bridge v3: The AuthExtender
+# Access Controller Bridge v3
 
 ## Bridging Hierarchies and Component Authorization via Capability Borrowing
 
@@ -15,20 +15,19 @@
 2. [Current State Analysis](#2-current-state-analysis)
 3. [Architectural Critique](#3-architectural-critique)
 4. [Departure from ComponentLink](#4-departure-from-componentlink)
-5. [The AuthExtender Concept](#5-the-authextender-concept)
-6. [Naming Discussion](#6-naming-discussion)
-7. [Guiding Principles](#7-guiding-principles)
-8. [Detailed Design](#8-detailed-design)
-9. [Process: Initialization](#9-process-initialization)
-10. [Process: Authorization (Borrow–Use–Return)](#10-process-authorization-borrowusereturn)
-11. [Process: Lifecycle Management](#11-process-lifecycle-management)
-12. [Impact on the Audit Trail](#12-impact-on-the-audit-trail)
-13. [Permission Lifecycle](#13-permission-lifecycle)
-14. [Account Abstraction Considerations](#14-account-abstraction-considerations)
-15. [Security Analysis](#15-security-analysis)
-16. [Compliance Analysis (GDPR, ISO 27001)](#16-compliance-analysis-gdpr-iso-27001)
-17. [Trade-offs and Alternatives Considered](#17-trade-offs-and-alternatives-considered)
-18. [Conclusion](#18-conclusion)
+5. [The Access Controller Bridge Concept](#5-the-access-controller-bridge-concept)
+6. [Guiding Principles](#6-guiding-principles)
+7. [Detailed Design](#7-detailed-design)
+8. [Process: Initialization](#8-process-initialization)
+9. [Process: Authorization (Borrow–Use–Return)](#9-process-authorization-borrowusereturn)
+10. [Process: Lifecycle Management](#10-process-lifecycle-management)
+11. [Impact on the Audit Trail](#11-impact-on-the-audit-trail)
+12. [Permission Lifecycle](#12-permission-lifecycle)
+13. [Account Abstraction Considerations](#13-account-abstraction-considerations)
+14. [Security Analysis](#14-security-analysis)
+15. [Compliance Analysis (GDPR, ISO 27001)](#15-compliance-analysis-gdpr-iso-27001)
+16. [Trade-offs and Alternatives Considered](#16-trade-offs-and-alternatives-considered)
+17. [Conclusion](#17-conclusion)
 
 - [Appendix A: Architecture Diagram](#appendix-a-architecture-diagram)
 - [Appendix B: End-to-End Examples](#appendix-b-end-to-end-examples)
@@ -186,52 +185,52 @@ While the component didn't know *how* authorization worked, it was deeply couple
 
 ### 4.3 The New Direction
 
-Instead of a protocol ceremony flowing through the component, we introduce the **AuthExtender** — a component that sits between hierarchies and the target component. The user:
+Instead of a protocol ceremony flowing through the component, we introduce the **AccessControllerBridge** — a component that sits between hierarchies and the target component. The user:
 
-1. **Borrows** a capability from the AuthExtender (hierarchies validation happens here)
+1. **Borrows** a capability from the AccessControllerBridge (hierarchies validation happens here)
 2. **Uses** the capability with the target component (audit trail)
-3. **Returns** the capability to the AuthExtender (capability lifecycle closes)
+3. **Returns** the capability to the AccessControllerBridge (capability lifecycle closes)
 
 The capability is a hot potato — no `drop` ability — so it must be returned within the same PTB. The target component simply checks the capability's permissions and source, without knowing anything about hierarchies, federations, or property validation.
 
 ### 4.4 Key Differences
 
-| Aspect | ComponentLink (v2) | AuthExtender (v3) |
+| Aspect | ComponentLink (v2) | AccessControllerBridge (v3) |
 | --- | --- | --- |
 | Authorization token | ActionRequest + ActionApproval pair | Single OperationCap |
-| Token lifecycle | Created by component, consumed by component | Borrowed from AuthExtender, returned to AuthExtender |
+| Token lifecycle | Created by component, consumed by component | Borrowed from AccessControllerBridge, returned to AccessControllerBridge |
 | Component coupling | Must create requests, consume approvals | Only reads OperationCap by reference |
 | Protocol types in component | ActionRequest, ActionApproval, PropertyScope | OperationCap only (read-only) |
 | Mapping direction | Property → action codes | CapabilityType → (properties + permissions) |
 | User-facing concept | Property scope per request | Capability type per borrow |
-| Hierarchies integration | Inside approve() on ComponentLink | Inside borrow() on AuthExtender |
+| Hierarchies integration | Inside approve() on ComponentLink | Inside borrow() on AccessControllerBridge |
 
 ---
 
-## 5. The AuthExtender Concept
+## 5. The Access Controller Bridge Concept
 
 ### 5.1 Core Idea
 
-The AuthExtender is a **capability issuer** that translates hierarchies' trust assertions into operational permissions for target components. It belongs to the hierarchies ecosystem and acts as the adapter between the world of properties/attestations and the world of component operations.
+The AccessControllerBridge is a **capability issuer** that translates hierarchies' trust assertions into operational permissions for target components. It belongs to the hierarchies ecosystem and acts as the adapter between the world of properties/attestations and the world of component operations.
 
-The AuthExtender holds **capability type definitions** — named configurations that specify:
+The AccessControllerBridge holds **capability type definitions** — named configurations that specify:
 - **Which properties** must be validated against the federation for the requesting entity
 - **Which permissions** (action codes) the resulting capability grants on the target component
 
 When a user wants to perform an operation on a protected component (e.g., add a record to an audit trail), they:
 
-1. Ask the AuthExtender for a capability of the appropriate type
-2. The AuthExtender validates their standing in the federation
-3. If valid, the AuthExtender issues an `OperationCap` — a hot potato with the granted permissions
+1. Ask the AccessControllerBridge for a capability of the appropriate type
+2. The AccessControllerBridge validates their standing in the federation
+3. If valid, the AccessControllerBridge issues an `OperationCap` — a hot potato with the granted permissions
 4. The user presents the `OperationCap` to the target component
 5. The component checks permissions and proceeds
-6. The user returns the `OperationCap` to the AuthExtender
+6. The user returns the `OperationCap` to the AccessControllerBridge
 
 ### 5.2 The Borrow–Use–Return Pattern
 
 ```text
 ┌─────────────┐     borrow()      ┌───────────────┐     validate_properties()     ┌────────────┐
-│    User      │ ───────────────► │  AuthExtender  │ ──────────────────────────► │ Federation │
+│    User      │ ───────────────► │  AccessControllerBridge  │ ──────────────────────────► │ Federation │
 │ (Attester)   │ ◄─────────────── │                │ ◄────────────────────────── │            │
 │              │   OperationCap   │                │        true/false           │            │
 │              │                  └───────────────┘                              └────────────┘
@@ -243,7 +242,7 @@ When a user wants to perform an operation on a protected component (e.g., add a 
 │              │                         └──────────────┘
 │              │
 │              │     return_cap()        ┌───────────────┐
-│              │ ──────────────────────► │  AuthExtender  │
+│              │ ──────────────────────► │  AccessControllerBridge  │
 │              │                         │  (destroys     │
 └─────────────┘                         │   OperationCap)│
                                         └───────────────┘
@@ -253,13 +252,13 @@ All three steps occur within a **single PTB** (Programmable Transaction Block). 
 
 ### 5.3 Why Borrowing, Not Creating
 
-In the ComponentLink model, authorization tokens (ActionRequest/ActionApproval) were created fresh by the component and the bridge, then consumed. The AuthExtender model uses a **borrow** metaphor instead:
+In the ComponentLink model, authorization tokens (ActionRequest/ActionApproval) were created fresh by the component and the bridge, then consumed. The AccessControllerBridge model uses a **borrow** metaphor instead:
 
 - **Intuitive**: "Borrow permission, use it, return it" maps to real-world patterns (borrow a badge, access the building, return the badge).
 - **Single token**: One `OperationCap` instead of two hot potatoes (request + approval).
 - **Cleaner component API**: The component receives a read-only reference to the cap. No request creation. No approval consumption.
-- **Auditable lifecycle**: The AuthExtender emits events on both borrow and return, creating a complete authorization audit trail.
-- **The AuthExtender owns the authorization logic**: The translation from properties to permissions happens entirely inside the AuthExtender. Components are pure data stores.
+- **Auditable lifecycle**: The AccessControllerBridge emits events on both borrow and return, creating a complete authorization audit trail.
+- **The AccessControllerBridge owns the authorization logic**: The translation from properties to permissions happens entirely inside the AccessControllerBridge. Components are pure data stores.
 
 ### 5.4 The Attester Remains the Output
 
@@ -276,32 +275,13 @@ Regional Inspector (Accreditor for catch_logging)
   └─ accredits Fisherman B as attester for catch_logging = [Mackerel]
 ```
 
-Only **attesters** can borrow capabilities from the AuthExtender. Accreditors, as accreditors, have no component access — their job is trust delegation within the federation. If an accreditor needs component access, they must also hold attester accreditations.
+Only **attesters** can borrow capabilities from the AccessControllerBridge. Accreditors, as accreditors, have no component access — their job is trust delegation within the federation. If an accreditor needs component access, they must also hold attester accreditations.
 
 **Root authorities** access governance operations through a separate path (no property validation — identity check only).
 
 ---
 
-## 6. Naming Discussion
-
-The working name "AuthExtender" captures the concept of extending authorization from hierarchies to components. Here are alternatives considered:
-
-| Name | Meaning | Pros | Cons |
-| --- | --- | --- | --- |
-| **AuthExtender** | Extends authorization across system boundaries | Descriptive, user-proposed | "Auth" is ambiguous (authentication vs authorization) |
-| **TrustAdapter** | Adapts trust assertions into capabilities | Precise: it adapts between trust models | "Adapter" is a generic pattern name |
-| **TrustGate** | Gate that checks trust before granting access | Short, memorable | Implies binary pass/fail, not capability issuance |
-| **CapabilityBridge** | Bridges hierarchies trust to component capabilities | Clear about what it bridges | "Bridge" was used in v2 naming |
-| **PolicyAdapter** | Adapts hierarchies policy to component permissions | Technical, precise | "Policy" overloaded in security contexts |
-| **AccessForge** | Forges access credentials from trust | Creative, memorable | "Forge" has negative connotations (forging documents) |
-
-**Recommendation**: Use **AuthExtender** throughout. It communicates that the hierarchies authorization is being *extended* into a new domain (component operations). The name also positions the component as part of the hierarchies ecosystem — it extends what hierarchies provides, rather than being an external mediator.
-
-Throughout this document, "AuthExtender" refers to this component.
-
----
-
-## 7. Guiding Principles
+## 6. Guiding Principles
 
 ### 7.1 Separation of Concerns
 
@@ -310,7 +290,7 @@ Three clean layers, each with a single responsibility:
 | Layer | Responsibility | Package |
 | --- | --- | --- |
 | **Protocol** | Defines `OperationCap` — the universal authorization token | `tf_components` |
-| **Adapter** | Translates hierarchies trust → OperationCap | `auth_extender` |
+| **Adapter** | Translates hierarchies trust → OperationCap | `access_controller_bridge` |
 | **Component** | Performs operations, checks OperationCap | `audit_trail`, etc. |
 
 The adapter knows about both hierarchies and the protocol layer. The component only knows about the protocol layer. Hierarchies knows about neither.
@@ -322,7 +302,7 @@ IOTA's programmable transaction blocks compose multiple package calls in a singl
 ### 7.3 Move-Native Idioms
 
 - **Hot potatoes** (no `drop` ability): OperationCap must be returned. Cannot be ignored or leaked.
-- **`&UID` witness**: Only the AuthExtender module can create and destroy OperationCaps stamped with its ID. Unforgeable.
+- **`&UID` witness**: Only the AccessControllerBridge module can create and destroy OperationCaps stamped with its ID. Unforgeable.
 - **Phantom types**: `OperationCap<phantom P>` provides compile-time type safety between components.
 - **By-reference consumption**: The target component reads the cap via `&OperationCap<P>` — it never takes ownership.
 
@@ -332,20 +312,20 @@ The OperationCap pattern works for any shared object with protected operations: 
 
 ### 7.5 Authority Source Agnosticism
 
-The component stores `trusted_source: ID`. It doesn't know whether the source is a federation-backed AuthExtender, a standalone AuthExtender, or a future AA adapter. Any authority that can produce `OperationCap<P>` with the right source ID works.
+The component stores `trusted_source: ID`. It doesn't know whether the source is a federation-backed AccessControllerBridge, a standalone AccessControllerBridge, or a future AA adapter. Any authority that can produce `OperationCap<P>` with the right source ID works.
 
 ### 7.6 Respect Hierarchies' Design
 
-The AuthExtender uses hierarchies exactly as designed:
+The AccessControllerBridge uses hierarchies exactly as designed:
 - `validate_property()` / `validate_properties()` for attester authorization
 - `is_root_authority()` for governance authorization
 - No modifications to hierarchies. No new functions needed.
 
 ---
 
-## 8. Detailed Design
+## 7. Detailed Design
 
-### 8.1 Protocol Layer: `OperationCap` (`tf_components::operation_cap`)
+### 7.1 Protocol Layer: `OperationCap` (`tf_components::operation_cap`)
 
 The `OperationCap` is the universal authorization token — a hot potato that carries permissions from the authority source to the target component.
 
@@ -354,11 +334,10 @@ module tf_components::operation_cap;
 
 use iota::object::{Self, UID, ID};
 use iota::vec_set::{Self, VecSet};
-use iota::vec_map::{Self, VecMap};
 
 /// The operational capability — a hot potato authorization token.
 ///
-/// Created by an authority source (AuthExtender) after validating
+/// Created by an authority source (AccessControllerBridge) after validating
 /// the requester's trust standing. Consumed by the same authority
 /// source after the component operation completes.
 ///
@@ -367,16 +346,18 @@ use iota::vec_map::{Self, VecMap};
 /// be duplicated. Pure hot potato.
 ///
 /// Phantom P provides compile-time type safety between components.
+///
+/// IMPORTANT: The OperationCap is a pure authorization token. It carries
+/// WHAT actions are permitted, not WHY they were permitted. The "why"
+/// (which properties were validated, under what scope) is the ACB's
+/// internal concern, captured in events for auditability. This keeps the
+/// protocol layer free of domain knowledge (hierarchies properties) and
+/// ensures components never interpret authorization context they don't own.
 public struct OperationCap<phantom P> {
     /// The component instance this cap authorizes operations on
     target: ID,
     /// The set of action codes this cap grants (component-specific u16 constants)
     permissions: VecSet<u16>,
-    /// The property scope that was validated to issue this cap.
-    /// Maps property names (String) to property values (vector<u8>).
-    /// Empty for governance operations.
-    /// Stored for on-chain traceability.
-    validated_scope: VecMap<String, vector<u8>>,
     /// The address that was authorized
     holder: address,
     /// Unforgeable identity of the authority object that issued this cap.
@@ -394,13 +375,11 @@ public fun new<P>(
     authority_uid: &UID,
     target: ID,
     permissions: VecSet<u16>,
-    validated_scope: VecMap<String, vector<u8>>,
     holder: address,
 ): OperationCap<P> {
     OperationCap {
         target,
         permissions,
-        validated_scope,
         holder,
         source: object::uid_to_inner(authority_uid),
     }
@@ -410,13 +389,13 @@ public fun new<P>(
 ///
 /// CRITICAL: requires `&UID` of the authority that issued the cap.
 /// Only the issuing authority can destroy it, ensuring the return
-/// goes to the correct AuthExtender.
+/// goes to the correct AccessControllerBridge.
 public fun destroy<P>(
     authority_uid: &UID,
     cap: OperationCap<P>,
 ) {
     let OperationCap {
-        target: _, permissions: _, validated_scope: _,
+        target: _, permissions: _,
         holder: _, source,
     } = cap;
     assert!(source == object::uid_to_inner(authority_uid));
@@ -434,10 +413,6 @@ public fun permissions<P>(cap: &OperationCap<P>): &VecSet<u16> {
     &cap.permissions
 }
 
-public fun validated_scope<P>(cap: &OperationCap<P>): &VecMap<String, vector<u8>> {
-    &cap.validated_scope
-}
-
 public fun holder<P>(cap: &OperationCap<P>): address { cap.holder }
 
 public fun source<P>(cap: &OperationCap<P>): ID { cap.source }
@@ -447,14 +422,14 @@ public fun source<P>(cap: &OperationCap<P>): ID { cap.source }
 
 1. **No abilities** — pure hot potato. Cannot be dropped, stored, copied, or become an owned object. Forces consumption through `destroy()`.
 2. **`&UID` witness for creation AND destruction** — the same unforgeable source binding from v2, applied to both ends of the lifecycle.
-3. **`validated_scope`** — carries the properties that were validated. On-chain traceability for auditors. The component doesn't interpret it — it's a passthrough for audit purposes.
+3. **No validated scope** — the OperationCap carries WHAT actions are permitted, not WHY. The "why" (which properties were validated) is the ACB's internal concern, captured in `CapabilityBorrowed` events for auditability. This keeps the protocol type free of domain knowledge and prevents components from interpreting authorization context they don't own. Scope changes (e.g., new property formats in hierarchies) never require changes to the protocol layer.
 4. **`permissions: VecSet<u16>`** — the cap carries multiple permissions. The component checks `has_permission(cap, specific_action)` per operation.
-5. **Generic types** (`String`, `vector<u8>`) for property scope — no dependency on hierarchies. The AuthExtender converts to `PropertyName`/`PropertyValue` at the boundary.
+5. **Minimal, stable surface** — four fields, all essential for authorization checking. This type should rarely if ever change, insulating all consumers from churn.
 
-### 8.2 The AuthExtender Structure
+### 7.2 The AccessControllerBridge Structure
 
 ```move
-module auth_extender::main;
+module access_controller_bridge::main;
 
 use tf_components::operation_cap::{Self, OperationCap};
 use hierarchies::main::Federation;
@@ -467,17 +442,17 @@ use iota::clock::Clock;
 use iota::event;
 use iota::tx_context::TxContext;
 
-/// The AuthExtender — adapter between hierarchies' trust model and
+/// The AccessControllerBridge — adapter between hierarchies' trust model and
 /// component operations.
 ///
-/// Each AuthExtender governs one component instance (e.g., one AuditTrail).
+/// Each AccessControllerBridge governs one component instance (e.g., one AuditTrail).
 /// It holds capability type definitions that map user-facing capability
 /// names to hierarchies property validations and component permissions.
 ///
 /// Phantom P provides compile-time type safety — an
-/// AuthExtender<AuditTrailPerm> can only issue
+/// AccessControllerBridge<AuditTrailPerm> can only issue
 /// OperationCap<AuditTrailPerm>.
-public struct AuthExtender<phantom P> has key, store {
+public struct AccessControllerBridge<phantom P> has key, store {
     id: UID,
     /// The component instance being governed
     target_id: ID,
@@ -494,7 +469,7 @@ public struct AuthExtender<phantom P> has key, store {
     version: u64,
 }
 
-/// How the AuthExtender determines authorization.
+/// How the AccessControllerBridge determines authorization.
 public enum AuthorityMode has store {
     /// Federation-backed: delegates trust determination to a
     /// hierarchies Federation.
@@ -515,7 +490,7 @@ public enum AuthorityMode has store {
 /// 2. Which permissions the resulting OperationCap grants
 public struct CapabilityTypeConfig has copy, drop, store {
     /// Property names that must be validated for the requesting entity.
-    /// The AuthExtender calls validate_properties() with these names
+    /// The AccessControllerBridge calls validate_properties() with these names
     /// and the values provided by the requester.
     required_properties: vector<String>,
     /// Action codes granted by this capability type.
@@ -531,12 +506,12 @@ public struct GroupConfig has copy, drop, store {
 }
 ```
 
-### 8.3 CapabilityType Mapping: The Translation Layer
+### 7.3 CapabilityType Mapping: The Translation Layer
 
 The `capability_types` map is the **core translation layer** — it defines how hierarchies' property-based trust translates into component-level permissions.
 
 ```text
-AuthExtender for "CatchRecords" trail:
+AccessControllerBridge for "CatchRecords" trail:
 
   capability_types:
     "catch_logger" → {
@@ -561,13 +536,13 @@ AuthExtender for "CatchRecords" trail:
 
 **Reading this mapping:**
 
-- A user borrowing capability type `"catch_logger"` must be an attester for the `catch_logging` property. They provide the property value (e.g., `Cod`). The AuthExtender validates `catch_logging = Cod` against the federation. If valid, they get an `OperationCap` with `{AddRecord, CorrectRecord}`.
+- A user borrowing capability type `"catch_logger"` must be an attester for the `catch_logging` property. They provide the property value (e.g., `Cod`). The AccessControllerBridge validates `catch_logging = Cod` against the federation. If valid, they get an `OperationCap` with `{AddRecord, CorrectRecord}`.
 
 - A user borrowing `"catch_inspector"` must be an attester for BOTH `catch_logging` AND `catch_management`. They provide values for both. Both must validate. If valid, they get the full permission set.
 
 - Governance actions (`DeleteAuditTrail`, `Migrate`) are not part of any capability type. They require root authority status, checked separately.
 
-### 8.4 Action Codes
+### 7.4 Action Codes
 
 Same as v2 — each component defines its action codes as `u16` constants with public accessor functions:
 
@@ -603,9 +578,9 @@ public fun migrate(): u16 { MIGRATE }
 // ...
 ```
 
-The 5 self-governance permissions (`AddRoles`, `UpdateRoles`, `DeleteRoles`, `AddCapabilities`, `RevokeCapabilities`) are eliminated. Governance is external — managed through the AuthExtender and the federation.
+The 5 self-governance permissions (`AddRoles`, `UpdateRoles`, `DeleteRoles`, `AddCapabilities`, `RevokeCapabilities`) are eliminated. Governance is external — managed through the AccessControllerBridge and the federation.
 
-### 8.5 The Type System: Phantom P
+### 7.5 The Type System: Phantom P
 
 Each component defines a zero-size marker type:
 
@@ -619,26 +594,26 @@ public struct AuditTrailPerm has drop {}
 This enables compile-time type safety:
 
 ```text
-AuthExtender<AuditTrailPerm>  →  OperationCap<AuditTrailPerm>  →  AuditTrail accepts only <AuditTrailPerm>
-AuthExtender<IdentityPerm>    →  OperationCap<IdentityPerm>    →  Identity accepts only <IdentityPerm>
+AccessControllerBridge<AuditTrailPerm>  →  OperationCap<AuditTrailPerm>  →  AuditTrail accepts only <AuditTrailPerm>
+AccessControllerBridge<IdentityPerm>    →  OperationCap<IdentityPerm>    →  Identity accepts only <IdentityPerm>
 ```
 
 An `OperationCap<IdentityPerm>` **cannot** be passed to an audit trail function expecting `OperationCap<AuditTrailPerm>`. The compiler rejects it.
 
-The AuthExtender is generic but only touches concrete fields on the OperationCap. It converts generic scope types to hierarchies types at the boundary. P flows through opaquely.
+The AccessControllerBridge is generic — P flows through opaquely from `borrow()` to the returned `OperationCap<P>`. It converts caller-provided scope to hierarchies types internally at the boundary, without exposing scope in the protocol token.
 
-### 8.6 Source Binding via `&UID` Witness
+### 7.6 Source Binding via `&UID` Witness
 
-The component stores `trusted_source: ID` — the ID of its governing AuthExtender. When the component receives an `OperationCap`, it checks:
+The component stores `trusted_source: ID` — the ID of its governing AccessControllerBridge. When the component receives an `OperationCap`, it checks:
 
 ```move
 assert!(operation_cap::source(&cap) == trail.trusted_source);
 ```
 
-The AuthExtender stamps each OperationCap with its own ID via `operation_cap::new(&self.id, ...)`. Since Move's field privacy prevents any external module from accessing `self.id`, the source field is **unforgeable**.
+The AccessControllerBridge stamps each OperationCap with its own ID via `operation_cap::new(&self.id, ...)`. Since Move's field privacy prevents any external module from accessing `self.id`, the source field is **unforgeable**.
 
 ```text
-  AuthExtender.id ──── only accessible by ──── auth_extender module
+  AccessControllerBridge.id ──── only accessible by ──── access_controller_bridge module
         │                                            │ calls
         ▼                                            ▼
   &UID ──────────── required by ──────── operation_cap::new(&UID, ...)
@@ -650,13 +625,13 @@ The AuthExtender stamps each OperationCap with its own ID via `operation_cap::ne
                                     trail.trusted_source: ID
 ```
 
-A rogue AuthExtender can only stamp its own ID. It cannot forge the trusted source's ID. **The type system is the trust infrastructure.**
+A rogue AccessControllerBridge can only stamp its own ID. It cannot forge the trusted source's ID. **The type system is the trust infrastructure.**
 
-### 8.7 Events (ISO 27001 A.8.15)
+### 7.7 Events (ISO 27001 A.8.15)
 
 ```move
-/// Emitted when an AuthExtender is created
-public struct AuthExtenderCreated has copy, drop {
+/// Emitted when an AccessControllerBridge is created
+public struct AccessControllerBridgeCreated has copy, drop {
     extender_id: ID,
     target_id: ID,
     federation_id: Option<ID>,
@@ -691,15 +666,15 @@ public struct GovernanceCapBorrowed has copy, drop {
     timestamp: u64,
 }
 
-/// Emitted when the AuthExtender configuration is updated
-public struct AuthExtenderUpdated has copy, drop {
+/// Emitted when the AccessControllerBridge configuration is updated
+public struct AccessControllerBridgeUpdated has copy, drop {
     extender_id: ID,
     updated_by: address,
     change_type: String,
 }
 
-/// Emitted when the AuthExtender is deleted
-public struct AuthExtenderDeleted has copy, drop {
+/// Emitted when the AccessControllerBridge is deleted
+public struct AccessControllerBridgeDeleted has copy, drop {
     extender_id: ID,
     deleted_by: address,
 }
@@ -707,23 +682,23 @@ public struct AuthExtenderDeleted has copy, drop {
 
 ---
 
-## 9. Process: Initialization
+## 8. Process: Initialization
 
-### 9.1 Overview
+### 8.1 Overview
 
 Initialization creates the full authorization ecosystem. The goal: after initialization, attesters can borrow capabilities and operate on the component, with all trust validated through the federation.
 
 ```text
 Step 1: Create Federation + define properties
 Step 2: Create the target component (AuditTrail)
-Step 3: Create the AuthExtender with capability type mappings
-Step 4: Bind the component to the AuthExtender (trusted_source)
+Step 3: Create the AccessControllerBridge with capability type mappings
+Step 4: Bind the component to the AccessControllerBridge (trusted_source)
 Step 5: Accredit participants in the federation
 ```
 
-### 9.2 Step 1: Create Federation and Properties
+### 8.2 Step 1: Create Federation and Properties
 
-This is standard hierarchies setup — independent of the AuthExtender:
+This is standard hierarchies setup — independent of the AccessControllerBridge:
 
 ```move
 // Root Authority creates the federation
@@ -749,7 +724,7 @@ hierarchies::add_property(
 );
 ```
 
-### 9.3 Step 2: Create the Target Component
+### 8.3 Step 2: Create the Target Component
 
 ```move
 // Root Authority creates the audit trail
@@ -763,10 +738,10 @@ let trail = audit_trail::create(
 // Trail is inert until trusted_source is set
 ```
 
-### 9.4 Step 3: Create the AuthExtender
+### 8.4 Step 3: Create the AccessControllerBridge
 
 ```move
-/// Create a new federation-backed AuthExtender.
+/// Create a new federation-backed AccessControllerBridge.
 /// Only callable by a root authority of the specified federation.
 public fun create_federation_extender<P>(
     federation: &Federation,
@@ -775,12 +750,12 @@ public fun create_federation_extender<P>(
     governance_actions: VecSet<u16>,
     clock: &Clock,
     ctx: &mut TxContext,
-): AuthExtender<P> {
+): AccessControllerBridge<P> {
     // Verify caller is root authority
     let sender_id = ctx.sender().to_id();
     assert!(federation.is_root_authority(&sender_id));
 
-    let extender = AuthExtender {
+    let extender = AccessControllerBridge {
         id: object::new(ctx),
         target_id,
         authority: AuthorityMode::FederationBacked {
@@ -791,7 +766,7 @@ public fun create_federation_extender<P>(
         version: PACKAGE_VERSION,
     };
 
-    event::emit(AuthExtenderCreated {
+    event::emit(AccessControllerBridgeCreated {
         extender_id: object::uid_to_inner(&extender.id),
         target_id,
         federation_id: option::some(federation.federation_id()),
@@ -840,13 +815,13 @@ let gov_actions = vec_set::from_keys(vector[
     actions::migrate(),
 ]);
 
-// Create the AuthExtender
-let extender = auth_extender::create_federation_extender<AuditTrailPerm>(
+// Create the AccessControllerBridge
+let extender = access_controller_bridge::create_federation_extender<AuditTrailPerm>(
     &federation, trail_id, cap_types, gov_actions, clock, ctx,
 );
 ```
 
-### 9.5 Step 4: Bind the Component to the AuthExtender
+### 8.5 Step 4: Bind the Component to the AccessControllerBridge
 
 ```move
 /// Set the trusted authority source for this trail.
@@ -870,9 +845,9 @@ audit_trail::set_trusted_source(
 );
 ```
 
-After this step, the trail only accepts `OperationCap` values whose `source` matches the AuthExtender's ID.
+After this step, the trail only accepts `OperationCap` values whose `source` matches the AccessControllerBridge's ID.
 
-### 9.6 Step 5: Accredit Participants
+### 8.6 Step 5: Accredit Participants
 
 Standard hierarchies operations — accredit attesters for the properties used in capability type configurations:
 
@@ -921,25 +896,25 @@ hierarchies::accredit_to_accredit(
 );
 ```
 
-### 9.7 "Known to Both Systems"
+### 8.7 "Known to Both Systems"
 
-After initialization, the AuthExtender and the target component are mutually aware:
+After initialization, the AccessControllerBridge and the target component are mutually aware:
 
 | System | What It Knows |
 | --- | --- |
-| **AuthExtender** | `target_id` — which component it governs. `federation_id` — which federation validates trust. `capability_types` — what capabilities it can issue. |
-| **Target Component** | `trusted_source` — the AuthExtender's ID. Accepts only OperationCaps from this source. |
-| **Federation** | Nothing about components or AuthExtenders. It only knows about properties, accreditors, and attesters. |
+| **AccessControllerBridge** | `target_id` — which component it governs. `federation_id` — which federation validates trust. `capability_types` — what capabilities it can issue. |
+| **Target Component** | `trusted_source` — the AccessControllerBridge's ID. Accepts only OperationCaps from this source. |
+| **Federation** | Nothing about components or AccessControllerBridges. It only knows about properties, accreditors, and attesters. |
 
-The `OperationCap` type in `tf_components` is the shared protocol — both the AuthExtender (creates/destroys) and the component (reads) depend on it. Neither depends on each other directly.
+The `OperationCap` type in `tf_components` is the shared protocol — both the AccessControllerBridge (creates/destroys) and the component (reads) depend on it. Neither depends on each other directly.
 
-### 9.8 Full Bootstrap Sequence Diagram
+### 8.8 Full Bootstrap Sequence Diagram
 
 ```mermaid
 sequenceDiagram
     participant RA as Root Authority
     participant Fed as Federation
-    participant AE as AuthExtender
+    participant AE as AccessControllerBridge
     participant Trail as AuditTrail
 
     RA->>Fed: new_federation()
@@ -950,10 +925,10 @@ sequenceDiagram
     Note right of Trail: Trail is inert until<br/>trusted_source is set
 
     RA->>AE: create_federation_extender(<br/>  capability_types: {<br/>    "catch_logger" → {<br/>      required: [catch_logging],<br/>      grants: {AddRecord, CorrectRecord}<br/>    },<br/>    "catch_manager" → {<br/>      required: [catch_logging, catch_management],<br/>      grants: {+DeleteRecord, UpdateMetadata, ...}<br/>    }<br/>  },<br/>  governance: {DeleteTrail, Migrate})
-    AE-->>RA: AuthExtender created
+    AE-->>RA: AccessControllerBridge created
 
     RA->>Trail: set_trusted_source(extender_id)
-    Note right of Trail: Trail now trusts<br/>this AuthExtender
+    Note right of Trail: Trail now trusts<br/>this AccessControllerBridge
 
     RA->>Fed: accredit_to_attest(fisherman_A, catch_logging=[Cod])
     RA->>Fed: accredit_to_attest(inspector, catch_management=[any])
@@ -963,15 +938,15 @@ sequenceDiagram
 
 ---
 
-## 10. Process: Authorization (Borrow–Use–Return)
+## 9. Process: Authorization (Borrow–Use–Return)
 
-### 10.1 The Borrow Step (Federation-Backed)
+### 9.1 The Borrow Step (Federation-Backed)
 
 ```move
 /// Borrow an OperationCap by providing a capability type and
 /// property values for validation.
 ///
-/// The AuthExtender:
+/// The AccessControllerBridge:
 /// 1. Looks up the capability type configuration
 /// 2. Pairs provided property values with required property names
 /// 3. Calls validate_properties() on the federation
@@ -981,7 +956,7 @@ sequenceDiagram
 /// The returned OperationCap is a hot potato — MUST be returned
 /// via return_cap() within the same PTB.
 public fun borrow<P>(
-    extender: &AuthExtender<P>,
+    extender: &AccessControllerBridge<P>,
     federation: &Federation,
     capability_type: String,
     property_values: VecMap<String, vector<u8>>,
@@ -1027,14 +1002,18 @@ public fun borrow<P>(
     ));
 
     // 5. Issue the OperationCap
+    // 5. Issue the OperationCap (minimal — no scope, just permissions)
     let cap = operation_cap::new<P>(
         &extender.id,
         extender.target_id,
         config.granted_permissions,
-        property_values,    // store validated scope for traceability
         ctx.sender(),
     );
 
+    // 6. Emit event with full scope for auditability
+    // The validated scope lives in the event, NOT in the OperationCap.
+    // This keeps the protocol token free of domain knowledge while
+    // providing full traceability for auditors.
     event::emit(CapabilityBorrowed {
         extender_id: object::uid_to_inner(&extender.id),
         target_id: extender.target_id,
@@ -1054,13 +1033,13 @@ public fun borrow<P>(
 
 2. **Property values as user input**: The user provides the property values they claim. The federation validates them. This is the same caller-provided-scope principle from v2, but channeled through capability types.
 
-3. **Type conversion at the boundary**: The AuthExtender converts `String` → `PropertyName` and `vector<u8>` → `PropertyValue` before calling hierarchies. This is the **only place** in the entire system that couples to hierarchies' type system.
+3. **Type conversion at the boundary**: The AccessControllerBridge converts `String` → `PropertyName` and `vector<u8>` → `PropertyValue` before calling hierarchies. This is the **only place** in the entire system that couples to hierarchies' type system.
 
 4. **`validate_properties()` — batch validation**: One call validates all required properties. Hierarchies checks: is the sender an attester? For each property: is the name valid? Is the value within the attester's accredited scope? Is the timespan valid?
 
-5. **Validated scope in OperationCap**: The property values that were validated are stored in the OperationCap. On-chain, anyone can see exactly what properties were checked. Stronger traceability than implicit authorization.
+5. **Scope in events, not in OperationCap**: The validated scope is captured in the `CapabilityBorrowed` event — the authoritative audit record. The OperationCap carries only permissions, not the reasoning behind them. This enforces clean separation: the component checks WHAT you may do, the ACB events record WHY you were authorized.
 
-### 10.2 The Borrow Step (Governance)
+### 9.2 The Borrow Step (Governance)
 
 Governance operations don't go through capability types — they check root authority status:
 
@@ -1068,7 +1047,7 @@ Governance operations don't go through capability types — they check root auth
 /// Borrow an OperationCap for a governance action.
 /// Only root authorities of the linked federation can borrow governance caps.
 public fun borrow_governance<P>(
-    extender: &AuthExtender<P>,
+    extender: &AccessControllerBridge<P>,
     federation: &Federation,
     action: u16,
     clock: &Clock,
@@ -1098,7 +1077,6 @@ public fun borrow_governance<P>(
         &extender.id,
         extender.target_id,
         permissions,
-        vec_map::empty(),   // no property scope for governance
         ctx.sender(),
     );
 
@@ -1114,7 +1092,7 @@ public fun borrow_governance<P>(
 }
 ```
 
-### 10.3 The Use Step
+### 9.3 The Use Step
 
 The target component receives the `OperationCap` **by reference**. It checks:
 
@@ -1165,16 +1143,16 @@ The audit trail is **completely unaware** of hierarchies, federations, property 
 
 The trail is a **pure data component** — records, locking, events. No embedded governance.
 
-### 10.4 The Return Step
+### 9.4 The Return Step
 
 ```move
-/// Return an OperationCap to the AuthExtender. Consumes the hot potato.
+/// Return an OperationCap to the AccessControllerBridge. Consumes the hot potato.
 ///
 /// This MUST be called within the same PTB as borrow().
 /// The OperationCap has no `drop` ability — the transaction aborts
 /// if this is not called.
 public fun return_cap<P>(
-    extender: &AuthExtender<P>,
+    extender: &AccessControllerBridge<P>,
     cap: OperationCap<P>,
     clock: &Clock,
 ) {
@@ -1192,18 +1170,18 @@ public fun return_cap<P>(
 }
 ```
 
-### 10.5 Complete PTB Flow
+### 9.5 Complete PTB Flow
 
 Within a single Programmable Transaction Block:
 
 ```move
 // === Single PTB ===
 
-// Step 1: Borrow capability from AuthExtender
+// Step 1: Borrow capability from AccessControllerBridge
 let mut prop_values = vec_map::empty();
 prop_values.insert(string::utf8(b"catch_logging"), b"Cod");
 
-let cap = auth_extender::borrow(
+let cap = access_controller_bridge::borrow(
     &extender,
     &federation,
     string::utf8(b"catch_logger"),
@@ -1223,19 +1201,19 @@ audit_trail::add_record(
     ctx,
 );
 
-// Step 3: Return capability to AuthExtender
-auth_extender::return_cap(&extender, cap, clock);
+// Step 3: Return capability to AccessControllerBridge
+access_controller_bridge::return_cap(&extender, cap, clock);
 // cap is consumed (destroyed) — hot potato fulfilled
 ```
 
 If any step fails, the entire PTB aborts. No partial authorization. No leaked capabilities.
 
-### 10.6 Multiple Operations Per Borrow
+### 9.6 Multiple Operations Per Borrow
 
 Since the cap is passed by reference, the user can perform **multiple operations** with a single borrow — as long as the cap has the necessary permissions:
 
 ```move
-let cap = auth_extender::borrow(
+let cap = access_controller_bridge::borrow(
     &extender, &federation,
     string::utf8(b"catch_manager"),     // has multiple permissions
     prop_values, clock, ctx,
@@ -1247,12 +1225,12 @@ audit_trail::add_record(&mut trail, &cap, data2, metadata2, clock, ctx);
 audit_trail::correct_record(&mut trail, &cap, seq, data3, clock, ctx);
 audit_trail::update_metadata(&mut trail, &cap, new_metadata, ctx);
 
-auth_extender::return_cap(&extender, cap, clock);
+access_controller_bridge::return_cap(&extender, cap, clock);
 ```
 
 This is more efficient than v2's model where each operation needed its own ActionRequest + ActionApproval pair.
 
-### 10.7 Standalone Mode
+### 9.7 Standalone Mode
 
 For simple scenarios without a federation:
 
@@ -1260,7 +1238,7 @@ For simple scenarios without a federation:
 /// Borrow an OperationCap in standalone mode.
 /// Checks sender against groups. No federation needed.
 public fun borrow_standalone<P>(
-    extender: &AuthExtender<P>,
+    extender: &AccessControllerBridge<P>,
     capability_type: String,
     clock: &Clock,
     ctx: &TxContext,
@@ -1310,7 +1288,6 @@ public fun borrow_standalone<P>(
         &extender.id,
         extender.target_id,
         config.granted_permissions,
-        vec_map::empty(),   // no property scope in standalone
         requester,
     );
 
@@ -1329,12 +1306,12 @@ public fun borrow_standalone<P>(
 
 Standalone mode ignores property validation — there's no federation. Group membership determines access. If you need property-level scoping, use a federation.
 
-### 10.8 Standalone Governance
+### 9.8 Standalone Governance
 
 ```move
 /// Borrow a governance cap in standalone mode. Admin only.
 public fun borrow_governance_standalone<P>(
-    extender: &AuthExtender<P>,
+    extender: &AccessControllerBridge<P>,
     action: u16,
     clock: &Clock,
     ctx: &TxContext,
@@ -1356,7 +1333,6 @@ public fun borrow_governance_standalone<P>(
         &extender.id,
         extender.target_id,
         permissions,
-        vec_map::empty(),
         requester,
     );
 
@@ -1374,9 +1350,9 @@ public fun borrow_governance_standalone<P>(
 
 ---
 
-## 11. Process: Lifecycle Management
+## 10. Process: Lifecycle Management
 
-### 11.1 Modifying Capability Type Configurations
+### 10.1 Modifying Capability Type Configurations
 
 Root authorities can update what a capability type requires and grants:
 
@@ -1384,7 +1360,7 @@ Root authorities can update what a capability type requires and grants:
 /// Update an existing capability type configuration.
 /// Federation-backed: only root authority. Standalone: only admin.
 public fun update_capability_type<P>(
-    extender: &mut AuthExtender<P>,
+    extender: &mut AccessControllerBridge<P>,
     federation: &Federation,
     capability_type: String,
     new_config: CapabilityTypeConfig,
@@ -1397,7 +1373,7 @@ public fun update_capability_type<P>(
     extender.capability_types.remove(&capability_type);
     extender.capability_types.insert(capability_type, new_config);
 
-    event::emit(AuthExtenderUpdated {
+    event::emit(AccessControllerBridgeUpdated {
         extender_id: object::uid_to_inner(&extender.id),
         updated_by: ctx.sender(),
         change_type: string::utf8(b"update_capability_type"),
@@ -1419,7 +1395,7 @@ let updated_config = capability_type_config::new(
     ]),
 );
 
-auth_extender::update_capability_type(
+access_controller_bridge::update_capability_type(
     &mut extender,
     &federation,
     string::utf8(b"catch_logger"),
@@ -1428,12 +1404,12 @@ auth_extender::update_capability_type(
 );
 ```
 
-### 11.2 Adding and Removing Capability Types
+### 10.2 Adding and Removing Capability Types
 
 ```move
-/// Add a new capability type to the AuthExtender.
+/// Add a new capability type to the AccessControllerBridge.
 public fun add_capability_type<P>(
-    extender: &mut AuthExtender<P>,
+    extender: &mut AccessControllerBridge<P>,
     federation: &Federation,
     capability_type: String,
     config: CapabilityTypeConfig,
@@ -1443,16 +1419,16 @@ public fun add_capability_type<P>(
     assert!(!extender.capability_types.contains(&capability_type));
     extender.capability_types.insert(capability_type, config);
 
-    event::emit(AuthExtenderUpdated {
+    event::emit(AccessControllerBridgeUpdated {
         extender_id: object::uid_to_inner(&extender.id),
         updated_by: ctx.sender(),
         change_type: string::utf8(b"add_capability_type"),
     });
 }
 
-/// Remove a capability type from the AuthExtender.
+/// Remove a capability type from the AccessControllerBridge.
 public fun remove_capability_type<P>(
-    extender: &mut AuthExtender<P>,
+    extender: &mut AccessControllerBridge<P>,
     federation: &Federation,
     capability_type: String,
     ctx: &TxContext,
@@ -1461,7 +1437,7 @@ public fun remove_capability_type<P>(
     assert!(extender.capability_types.contains(&capability_type));
     extender.capability_types.remove(&capability_type);
 
-    event::emit(AuthExtenderUpdated {
+    event::emit(AccessControllerBridgeUpdated {
         extender_id: object::uid_to_inner(&extender.id),
         updated_by: ctx.sender(),
         change_type: string::utf8(b"remove_capability_type"),
@@ -1469,12 +1445,12 @@ public fun remove_capability_type<P>(
 }
 ```
 
-### 11.3 Updating Governance Actions
+### 10.3 Updating Governance Actions
 
 ```move
 /// Update the set of governance actions.
 public fun update_governance_actions<P>(
-    extender: &mut AuthExtender<P>,
+    extender: &mut AccessControllerBridge<P>,
     federation: &Federation,
     governance_actions: VecSet<u16>,
     ctx: &TxContext,
@@ -1482,7 +1458,7 @@ public fun update_governance_actions<P>(
     assert_governor(extender, federation, ctx);
     extender.governance_actions = governance_actions;
 
-    event::emit(AuthExtenderUpdated {
+    event::emit(AccessControllerBridgeUpdated {
         extender_id: object::uid_to_inner(&extender.id),
         updated_by: ctx.sender(),
         change_type: string::utf8(b"update_governance_actions"),
@@ -1490,12 +1466,12 @@ public fun update_governance_actions<P>(
 }
 ```
 
-### 11.4 Standalone Permission Management
+### 10.4 Standalone Permission Management
 
 ```move
 /// Add a member to a standalone group. Admin only.
 public fun add_group_member<P>(
-    extender: &mut AuthExtender<P>,
+    extender: &mut AccessControllerBridge<P>,
     group_name: String,
     member: address,
     ctx: &TxContext,
@@ -1511,7 +1487,7 @@ public fun add_group_member<P>(
 
 /// Remove a member from a standalone group. Admin only.
 public fun remove_group_member<P>(
-    extender: &mut AuthExtender<P>,
+    extender: &mut AccessControllerBridge<P>,
     group_name: String,
     member: address,
     ctx: &TxContext,
@@ -1528,7 +1504,7 @@ public fun remove_group_member<P>(
 
 Revocation is immediate — remove an address, their next `borrow_standalone()` fails.
 
-### 11.5 Migration: Standalone → Federation
+### 10.5 Migration: Standalone → Federation
 
 One-way upgrade:
 
@@ -1536,7 +1512,7 @@ One-way upgrade:
 /// Upgrade to federation-backed mode.
 /// Caller must be standalone admin AND federation root authority.
 public fun upgrade_to_federation<P>(
-    extender: &mut AuthExtender<P>,
+    extender: &mut AccessControllerBridge<P>,
     federation: &Federation,
     ctx: &TxContext,
 ) {
@@ -1547,7 +1523,7 @@ public fun upgrade_to_federation<P>(
         federation_id: federation.federation_id(),
     };
 
-    event::emit(AuthExtenderUpdated {
+    event::emit(AccessControllerBridgeUpdated {
         extender_id: object::uid_to_inner(&extender.id),
         updated_by: ctx.sender(),
         change_type: string::utf8(b"upgrade_to_federation"),
@@ -1557,20 +1533,20 @@ public fun upgrade_to_federation<P>(
 
 The target component is untouched — same `trusted_source: ID`.
 
-### 11.6 Upgrading the AuthExtender Package
+### 10.6 Upgrading the AccessControllerBridge Package
 
-When the `auth_extender` package is upgraded (new version published):
+When the `access_controller_bridge` package is upgraded (new version published):
 
-1. **OperationCap is unaffected**: It lives in `tf_components`, not in `auth_extender`. No change to the protocol token.
-2. **AuthExtender object needs migration**: The `version` field tracks compatibility.
-3. **Target component is unaffected**: It depends on `tf_components::operation_cap`, not on `auth_extender`.
-4. **Federation is unaffected**: It has no knowledge of the AuthExtender.
+1. **OperationCap is unaffected**: It lives in `tf_components`, not in `access_controller_bridge`. No change to the protocol token.
+2. **AccessControllerBridge object needs migration**: The `version` field tracks compatibility.
+3. **Target component is unaffected**: It depends on `tf_components::operation_cap`, not on `access_controller_bridge`.
+4. **Federation is unaffected**: It has no knowledge of the AccessControllerBridge.
 
 ```move
-/// Migrate the AuthExtender to the new package version.
+/// Migrate the AccessControllerBridge to the new package version.
 /// Only governance (root authority / admin) can migrate.
 public fun migrate<P>(
-    extender: &mut AuthExtender<P>,
+    extender: &mut AccessControllerBridge<P>,
     federation: &Federation,
     ctx: &TxContext,
 ) {
@@ -1582,7 +1558,7 @@ public fun migrate<P>(
 
     extender.version = PACKAGE_VERSION;
 
-    event::emit(AuthExtenderUpdated {
+    event::emit(AccessControllerBridgeUpdated {
         extender_id: object::uid_to_inner(&extender.id),
         updated_by: ctx.sender(),
         change_type: string::utf8(b"migrate"),
@@ -1592,13 +1568,13 @@ public fun migrate<P>(
 
 **During migration downtime**: Between package upgrade and object migration, `borrow()` calls fail (`version != PACKAGE_VERSION`). This is a deliberate safety gate — the governance must explicitly migrate the object to the new version.
 
-### 11.7 Upgrading the Audit Trail Package
+### 10.7 Upgrading the Audit Trail Package
 
 When the `audit_trail` package is upgraded:
 
-1. **AuthExtender is unaffected**: It creates OperationCaps using `tf_components`. It doesn't call audit trail functions.
+1. **AccessControllerBridge is unaffected**: It creates OperationCaps using `tf_components`. It doesn't call audit trail functions.
 2. **AuditTrail object needs migration**: Standard audit trail migration (already has `version` field and `migrate()` function).
-3. **Action codes may change**: If the audit trail adds new operations (new action codes), the AuthExtender's capability type configs can be updated to include them.
+3. **Action codes may change**: If the audit trail adds new operations (new action codes), the AccessControllerBridge's capability type configs can be updated to include them.
 4. **OperationCap is unaffected**: The protocol token doesn't change.
 
 **Sequence for adding a new audit trail operation:**
@@ -1606,19 +1582,19 @@ When the `audit_trail` package is upgraded:
 ```text
 1. Publish new audit_trail package with new action code
 2. Migrate AuditTrail object to new version
-3. Update AuthExtender capability type configs to include new action code
+3. Update AccessControllerBridge capability type configs to include new action code
 4. New operation is available
 ```
 
 Steps 2 and 3 can happen in separate PTBs. Between steps 2 and 3, the new operation exists but no capability type grants it — secure by default.
 
-### 11.8 Upgrading the Hierarchies Package
+### 10.8 Upgrading the Hierarchies Package
 
 When the `hierarchies` package is upgraded:
 
-1. **The AuthExtender calls `validate_properties()`**: If the function signature changes, the AuthExtender package MUST be upgraded too.
-2. **If hierarchies is backward-compatible** (same API, internal changes only): No changes needed to AuthExtender.
-3. **If hierarchies changes `validate_properties()` signature**: AuthExtender package must be upgraded and its object migrated.
+1. **The AccessControllerBridge calls `validate_properties()`**: If the function signature changes, the AccessControllerBridge package MUST be upgraded too.
+2. **If hierarchies is backward-compatible** (same API, internal changes only): No changes needed to AccessControllerBridge.
+3. **If hierarchies changes `validate_properties()` signature**: AccessControllerBridge package must be upgraded and its object migrated.
 4. **Target component is unaffected**: It has no dependency on hierarchies.
 5. **OperationCap is unaffected**: It has no dependency on hierarchies.
 
@@ -1627,51 +1603,51 @@ When the `hierarchies` package is upgraded:
 ```text
 1. Publish new hierarchies package
 2. Migrate Federation object
-3. Publish new auth_extender package (updated for new hierarchies API)
-4. Migrate AuthExtender object
+3. Publish new access_controller_bridge package (updated for new hierarchies API)
+4. Migrate AccessControllerBridge object
 5. System is live with new hierarchies
 ```
 
-### 11.9 Upgrading tf_components (Protocol Layer)
+### 10.9 Upgrading tf_components (Protocol Layer)
 
 This is the most impactful upgrade — `OperationCap` lives here.
 
-1. **If OperationCap fields change**: ALL consumers (AuthExtender, audit trail, identity, etc.) must be upgraded.
+1. **If OperationCap fields change**: ALL consumers (AccessControllerBridge, audit trail, identity, etc.) must be upgraded.
 2. **If only new functions are added**: No impact on existing consumers.
 3. **If accessor signatures change**: Consumers must be updated.
 
 **Mitigation**: `tf_components` should be treated as the most stable layer. Changes to `OperationCap` should be extremely rare and backward-compatible where possible.
 
-### 11.10 Replacing an AuthExtender Instance
+### 10.10 Replacing an AccessControllerBridge Instance
 
-If the AuthExtender object itself needs to be replaced (not just upgraded):
+If the AccessControllerBridge object itself needs to be replaced (not just upgraded):
 
 ```text
-1. Create new AuthExtender (with updated configuration)
+1. Create new AccessControllerBridge (with updated configuration)
 2. Update target component: set_trusted_source(new_extender_id)
-3. Old AuthExtender can be deleted
+3. Old AccessControllerBridge can be deleted
 ```
 
-**Critical**: Between step 2 and the update, any in-flight PTBs using the old AuthExtender will fail (source mismatch). This is a brief service interruption. For zero-downtime replacement:
+**Critical**: Between step 2 and the update, any in-flight PTBs using the old AccessControllerBridge will fail (source mismatch). This is a brief service interruption. For zero-downtime replacement:
 
 ```text
-1. Create new AuthExtender
+1. Create new AccessControllerBridge
 2. Support dual trusted_source on the component (temporarily)
 3. Switch over
 4. Remove old trusted_source support
-5. Delete old AuthExtender
+5. Delete old AccessControllerBridge
 ```
 
 However, dual trusted_source adds complexity. For most scenarios, the brief interruption during `set_trusted_source` is acceptable.
 
-### 11.11 Version Compatibility Matrix
+### 10.11 Version Compatibility Matrix
 
 ```text
 ┌─────────────────────┬──────────────────────┬────────────┬───────────────┬───────────────┐
-│ Component Upgraded  │ AuthExtender Impact  │ Trail      │ Federation    │ tf_components │
+│ Component Upgraded  │ AccessControllerBridge Impact  │ Trail      │ Federation    │ tf_components │
 │                     │                      │ Impact     │ Impact        │ Impact        │
 ├─────────────────────┼──────────────────────┼────────────┼───────────────┼───────────────┤
-│ auth_extender       │ Migrate object       │ NONE       │ NONE          │ NONE          │
+│ access_controller_bridge       │ Migrate object       │ NONE       │ NONE          │ NONE          │
 │ audit_trail         │ Maybe update configs │ Migrate    │ NONE          │ NONE          │
 │ hierarchies         │ Maybe upgrade pkg    │ NONE       │ Migrate       │ NONE          │
 │ tf_components       │ Upgrade pkg+migrate  │ Upgrade    │ NONE          │ Migrate       │
@@ -1681,9 +1657,9 @@ However, dual trusted_source adds complexity. For most scenarios, the brief inte
 
 ---
 
-## 12. Impact on the Audit Trail
+## 11. Impact on the Audit Trail
 
-### 12.1 What Is Removed
+### 11.1 What Is Removed
 
 - The `roles: RoleMap<Permission, RecordTags>` field
 - The 5 self-governance permissions (`AddRoles`, `UpdateRoles`, `DeleteRoles`, `AddCapabilities`, `RevokeCapabilities`)
@@ -1691,7 +1667,7 @@ However, dual trusted_source adds complexity. For most scenarios, the brief inte
 - `create()` no longer returns a `Capability`
 - All `&Capability` parameters in protected functions
 
-### 12.2 Refactored AuditTrail
+### 11.2 Refactored AuditTrail
 
 ```move
 public struct AuditTrail<D: store + copy> has key, store {
@@ -1705,12 +1681,12 @@ public struct AuditTrail<D: store + copy> has key, store {
     updatable_metadata: Option<String>,
     version: u64,
     /// The authority source this trail trusts.
-    /// Points to the AuthExtender's ID.
+    /// Points to the AccessControllerBridge's ID.
     trusted_source: ID,
 }
 ```
 
-### 12.3 Protected Functions Accept `&OperationCap`
+### 11.3 Protected Functions Accept `&OperationCap`
 
 Every protected function takes `&OperationCap<AuditTrailPerm>` instead of the old `&Capability`:
 
@@ -1735,67 +1711,67 @@ assert!(operation_cap::has_permission(cap, EXPECTED_ACTION)); // right permissio
 assert!(operation_cap::holder(cap) == ctx.sender());          // right sender
 ```
 
-### 12.4 What the Component Sees
+### 11.4 What the Component Sees
 
 The audit trail is **completely unaware** of how authorization works. It stores one `trusted_source: ID`, receives `OperationCap` references, and checks permissions + source. It doesn't know about:
 - Hierarchies or federations
 - Properties or attestations
 - Capability types or mappings
-- Whether the AuthExtender is federation-backed or standalone
+- Whether the AccessControllerBridge is federation-backed or standalone
 
 The trail is a **pure data component**.
 
 ---
 
-## 13. Permission Lifecycle
+## 12. Permission Lifecycle
 
-All permission lifecycle operations happen at the federation or AuthExtender level. The target component is never modified.
+All permission lifecycle operations happen at the federation or AccessControllerBridge level. The target component is never modified.
 
-### 13.1 Granting Access
+### 12.1 Granting Access
 
-Grant accreditation in the federation. The entity's next `borrow()` call succeeds. No changes to any trail or AuthExtender.
+Grant accreditation in the federation. The entity's next `borrow()` call succeeds. No changes to any trail or AccessControllerBridge.
 
-### 13.2 Revoking Access
+### 12.2 Revoking Access
 
 Revoke accreditation. Immediate and universal. No stale tokens — every borrow checks live federation state. There is nothing to revoke on the component side.
 
 **Comparison**: In the current model, revoking access means adding a Capability ID to a denylist. The Capability object still exists in the user's wallet. In the proposed model, there is no persistent token — the authority check is against live state at borrow time.
 
-### 13.3 Changing Scope
+### 12.3 Changing Scope
 
 Add or remove accreditations for different properties. Immediate effect. The next borrow validates against the updated accreditations.
 
-### 13.4 Changing the Permission Mapping
+### 12.4 Changing the Permission Mapping
 
-Update capability type configurations on the AuthExtender. Only root authorities (federation) or admins (standalone) can do this. Immediately effective.
+Update capability type configurations on the AccessControllerBridge. Only root authorities (federation) or admins (standalone) can do this. Immediately effective.
 
-### 13.5 Promoting / Demoting
+### 12.5 Promoting / Demoting
 
 Promotion: grant `accreditation_to_accredit` (trust delegation) and/or `accreditation_to_attest` for additional properties (operational access).
 
 Demotion: revoke the relevant accreditations. Immediate.
 
-### 13.6 Summary
+### 12.6 Summary
 
-| Operation | Embedded RBAC (current) | AuthExtender |
+| Operation | Embedded RBAC (current) | AccessControllerBridge |
 | --- | --- | --- |
 | Grant access | Create role + issue Capability per trail | Single federation accreditation |
 | Revoke access | Add to denylist. Token still in wallet | Revoke accreditation. Immediate |
 | Change scope | Issue new Capability, revoke old, per trail | Update accreditation. Immediate everywhere |
-| Change capability type mapping | N/A | Update AuthExtender config. One object |
-| Multi-trail governance | Manual per-trail setup | One federation + one AuthExtender per trail |
+| Change capability type mapping | N/A | Update AccessControllerBridge config. One object |
+| Multi-trail governance | Manual per-trail setup | One federation + one AccessControllerBridge per trail |
 
 ---
 
-## 14. Account Abstraction Considerations
+## 13. Account Abstraction Considerations
 
-### 14.1 Authentication vs. Authorization
+### 13.1 Authentication vs. Authorization
 
 Account Abstraction (AA) introduces AI Accounts with programmable authentication. AA addresses **authentication** ("Is this Alice?"). The OperationCap pattern addresses **authorization** ("Alice MAY add records"). They are orthogonal.
 
-### 14.2 AA as an Authority Source
+### 13.2 AA as an Authority Source
 
-An AA adapter can produce `OperationCap` using its own `&UID`. The `trusted_source: ID` can point to an AA adapter just as easily as to an AuthExtender:
+An AA adapter can produce `OperationCap` using its own `&UID`. The `trusted_source: ID` can point to an AA adapter just as easily as to an AccessControllerBridge:
 
 ```move
 module aa_adapter::main;
@@ -1813,24 +1789,24 @@ public fun borrow<P>(
 }
 ```
 
-### 14.3 Why the Pattern Is AA-Ready
+### 13.3 Why the Pattern Is AA-Ready
 
-The target component doesn't care HOW the `OperationCap` is produced. AA is just another adapter. When AA ships, existing components and AuthExtenders continue to work — and new AA adapters can serve the same components.
+The target component doesn't care HOW the `OperationCap` is produced. AA is just another adapter. When AA ships, existing components and AccessControllerBridges continue to work — and new AA adapters can serve the same components.
 
 ---
 
-## 15. Security Analysis
+## 14. Security Analysis
 
-### 15.1 Source Binding (Rogue AuthExtender Attack)
+### 14.1 Source Binding (Rogue AccessControllerBridge Attack)
 
-**Attack**: An attacker creates their own federation and AuthExtender targeting someone else's trail.
+**Attack**: An attacker creates their own federation and AccessControllerBridge targeting someone else's trail.
 
-**Mitigation**: The trail's `trusted_source` points to the legitimate AuthExtender (0xABC). The rogue AuthExtender (0xDEF) can only stamp its own ID. The trail checks `source == trusted_source`: `0xABC ≠ 0xDEF` → ABORT.
+**Mitigation**: The trail's `trusted_source` points to the legitimate AccessControllerBridge (0xABC). The rogue AccessControllerBridge (0xDEF) can only stamp its own ID. The trail checks `source == trusted_source`: `0xABC ≠ 0xDEF` → ABORT.
 
 ```mermaid
 sequenceDiagram
     participant Attacker
-    participant AE2 as Rogue AuthExtender (0xDEF)
+    participant AE2 as Rogue AccessControllerBridge (0xDEF)
     participant Trail as Trail (trusted: 0xABC)
 
     Attacker->>AE2: borrow("catch_logger", ...)
@@ -1840,13 +1816,13 @@ sequenceDiagram
     Trail->>Trail: 0xABC == 0xDEF? ABORT
 ```
 
-### 15.2 Cross-Component Confusion
+### 14.2 Cross-Component Confusion
 
 **Mitigated by phantom P at compile time.** `OperationCap<AuditTrailPerm>` cannot satisfy `OperationCap<IdentityPerm>`. The compiler rejects it.
 
 Source binding provides independent runtime protection. Phantom P is defense in depth.
 
-### 15.3 Accreditor Tries to Borrow
+### 14.3 Accreditor Tries to Borrow
 
 ```text
 Inspector (accreditor only, NOT attester) tries: borrow("catch_logger", {catch_logging: Cod})
@@ -1856,7 +1832,7 @@ Inspector (accreditor only, NOT attester) tries: borrow("catch_logger", {catch_l
 2. ABORT. Borrow fails.
 ```
 
-### 15.4 Fisherman Claims Wrong Capability Type
+### 14.4 Fisherman Claims Wrong Capability Type
 
 ```text
 Fisherman A: attester for catch_logging = [Cod]
@@ -1868,7 +1844,7 @@ Tries: borrow("catch_manager", {catch_logging: Cod, catch_management: Cod})
 3. ABORT.
 ```
 
-### 15.5 Fisherman Claims Right Type, Wrong Value
+### 14.5 Fisherman Claims Right Type, Wrong Value
 
 ```text
 Fisherman A: attester for catch_logging = [Cod, Haddock]
@@ -1879,13 +1855,13 @@ Tries: borrow("catch_logger", {catch_logging: Mackerel})
 2. ABORT.
 ```
 
-### 15.6 The Lying Caller (Scope vs. Data Mismatch)
+### 14.6 The Lying Caller (Scope vs. Data Mismatch)
 
 The caller provides property values. They could claim `catch_logging = Cod` but record Mackerel data. The authorization layer doesn't inspect record content.
 
-**Mitigation**: The `OperationCap` carries `validated_scope` on-chain. The `CapabilityBorrowed` event records the scope. An auditor can detect the mismatch between the validated scope and the record data — evidence of fraud. This is superior to designs where scope is implicit.
+**Mitigation**: The `CapabilityBorrowed` event records the validated scope (property names and values) on-chain. An auditor can correlate the event's `validated_scope` with the record data to detect mismatches — evidence of fraud. The scope lives in the event (the authoritative audit record), not in the OperationCap, keeping the protocol token clean while preserving full traceability.
 
-### 15.7 Hot Potato Bypass Attempt
+### 14.7 Hot Potato Bypass Attempt
 
 **Attack**: The user borrows an OperationCap and tries to avoid returning it (keeping the authorization "active").
 
@@ -1896,15 +1872,15 @@ The caller provides property values. They could claim `catch_logging = Cod` but 
 - Cannot be copied (no `copy`)
 - Cannot be passed to another PTB (hot potatoes don't cross PTB boundaries)
 
-The **only** way to consume it is through `operation_cap::destroy()` — which requires the AuthExtender's `&UID`.
+The **only** way to consume it is through `operation_cap::destroy()` — which requires the AccessControllerBridge's `&UID`.
 
-### 15.8 Unauthorized destroy() Call
+### 14.8 Unauthorized destroy() Call
 
 **Attack**: A malicious module calls `operation_cap::destroy()` with its own `&UID` to consume someone else's OperationCap.
 
-**Mitigation**: `destroy()` asserts `cap.source == uid_to_inner(authority_uid)`. The cap's source is the legitimate AuthExtender's ID. The malicious module's UID has a different ID. Assertion fails → ABORT.
+**Mitigation**: `destroy()` asserts `cap.source == uid_to_inner(authority_uid)`. The cap's source is the legitimate AccessControllerBridge's ID. The malicious module's UID has a different ID. Assertion fails → ABORT.
 
-### 15.9 Front-Running Revocation
+### 14.9 Front-Running Revocation
 
 An attacker who monitors pending revocation can front-run with last-moment borrows.
 
@@ -1912,13 +1888,13 @@ An attacker who monitors pending revocation can front-run with last-moment borro
 
 **Mitigation**: Correction mechanism exists. For high-security: consider time-delayed record finalization.
 
-### 15.10 AuthExtender Configuration Manipulation
+### 14.10 AccessControllerBridge Configuration Manipulation
 
 A compromised root authority can modify capability type configs (adding permissions, reducing required properties).
 
 **Mitigation**: Multiple root authorities. Events on modification. Consider M-of-N approval for privilege escalation.
 
-### 15.11 Complete Security Properties
+### 14.11 Complete Security Properties
 
 | Property | Enforcement |
 | --- | --- |
@@ -1927,7 +1903,7 @@ A compromised root authority can modify capability type configs (adding permissi
 | Can't use rogue authority | Source binding: `cap.source == trail.trusted_source` |
 | Can't confuse components | Phantom P — compile-time type check |
 | Can't exceed property scope | `validate_properties(names, values)` — federation |
-| Can't exceed action scope | `cap.permissions` set by AuthExtender config |
+| Can't exceed action scope | `cap.permissions` set by AccessControllerBridge config |
 | Can't operate without attestation | `validate_properties` only passes for attesters |
 | Can't do governance without authority | `is_root_authority` check for governance borrows |
 | Can't keep borrowed cap | Hot potato — no `store`, `key`, `copy`, or `drop` |
@@ -1936,9 +1912,9 @@ A compromised root authority can modify capability type configs (adding permissi
 
 ---
 
-## 16. Compliance Analysis (GDPR, ISO 27001)
+## 15. Compliance Analysis (GDPR, ISO 27001)
 
-### 16.1 GDPR
+### 15.1 GDPR
 
 #### Personal Data on Chain
 
@@ -1958,7 +1934,7 @@ Federation accreditation maps are public. Reveals who holds what role.
 
 **Recommendation**: Pseudonymous identifiers (DIDs). Consider ZK proofs for accreditation verification.
 
-#### Validated Scope in OperationCap
+#### Validated Scope in Events
 
 The `CapabilityBorrowed` event includes `validated_scope` — the property names and values that were checked. If property values contain personal data, this is on-chain exposure.
 
@@ -1974,15 +1950,15 @@ The `CapabilityBorrowed` event includes `validated_scope` — the property names
 | Data minimization | Not enforced | Hash-only on-chain |
 | Retention policies | Partial (locking/deletion) | No automatic expiration |
 
-### 16.2 ISO 27001
+### 15.2 ISO 27001
 
 #### Strengths
 
 **A.8 Access Control**: Least privilege via capability type configurations. Immediate revocation. Segregation of duties between attesters, accreditors, root authorities. Temporal scoping via hierarchies' timespan validity.
 
-**A.8.15 Logging**: On-chain events for all operations. Complete borrow–return lifecycle tracking. `CapabilityBorrowed` and `CapabilityReturned` events create paired authorization audit records. `validated_scope` provides on-chain evidence of what was checked.
+**A.8.15 Logging**: On-chain events for all operations. Complete borrow–return lifecycle tracking. `CapabilityBorrowed` and `CapabilityReturned` events create paired authorization audit records. The `CapabilityBorrowed` event's `validated_scope` field provides on-chain evidence of what properties were checked.
 
-**Traceability**: The `OperationCap` contains the property scope that was validated — stronger provenance than implicit authorization. Auditors can independently verify that the right properties were checked for each operation.
+**Traceability**: The `CapabilityBorrowed` event records the exact property scope that was validated — stronger provenance than implicit authorization. Auditors can independently correlate the event's validated scope with component operation events to verify that the right properties were checked for each operation.
 
 **A.8.24 Segregation of Duties**: Three distinct roles (Root Authority, Accreditor, Attester) with non-overlapping access patterns. Governance actions are structurally separated from operational actions.
 
@@ -1998,37 +1974,37 @@ The `CapabilityBorrowed` event includes `validated_scope` — the property names
 
 **Recommendation**: Time-locked recovery or social recovery mechanism at the hierarchies level.
 
-**A.8.3 AuthExtender Configuration Escalation**: Single root authority can modify AuthExtender capability type permissions.
+**A.8.3 AccessControllerBridge Configuration Escalation**: Single root authority can modify AccessControllerBridge capability type permissions.
 
 **Recommendation**: M-of-N approval for privilege escalation. At minimum, emit events for monitoring.
 
 **A.5.29 No Emergency Freeze**: No mechanism to immediately halt all operations during a security incident.
 
-**Recommendation**: Add a `frozen: bool` field to AuthExtender. When frozen, `borrow()` always fails. Root authority can freeze/unfreeze. This provides an emergency brake without modifying the target component.
+**Recommendation**: Add a `frozen: bool` field to AccessControllerBridge. When frozen, `borrow()` always fails. Root authority can freeze/unfreeze. This provides an emergency brake without modifying the target component.
 
 ```move
 public fun freeze<P>(
-    extender: &mut AuthExtender<P>,
+    extender: &mut AccessControllerBridge<P>,
     federation: &Federation,
     ctx: &TxContext,
 ) {
     assert_governor(extender, federation, ctx);
     extender.frozen = true;
-    event::emit(AuthExtenderFrozen { ... });
+    event::emit(AccessControllerBridgeFrozen { ... });
 }
 
 public fun unfreeze<P>(
-    extender: &mut AuthExtender<P>,
+    extender: &mut AccessControllerBridge<P>,
     federation: &Federation,
     ctx: &TxContext,
 ) {
     assert_governor(extender, federation, ctx);
     extender.frozen = false;
-    event::emit(AuthExtenderUnfrozen { ... });
+    event::emit(AccessControllerBridgeUnfrozen { ... });
 }
 ```
 
-### 16.3 Summary of Compliance Gaps
+### 15.3 Summary of Compliance Gaps
 
 | # | Area | Finding | Severity | Recommendation |
 | --- | --- | --- | --- | --- |
@@ -2037,54 +2013,54 @@ public fun unfreeze<P>(
 | 3 | GDPR Art. 6 | Public accreditation status | Medium | Pseudonymous identifiers; ZK proofs |
 | 4 | GDPR Art. 25 | Validated scope in events may contain PII | Medium | Non-PII property values; hashes/codes |
 | 5 | ISO A.8.2 | No recovery for total root key loss | Critical | Social recovery mechanism |
-| 6 | ISO A.8.3 | AuthExtender escalation is single-key | High | M-of-N approval |
-| 7 | ISO A.5.29 | No emergency freeze | Medium | `frozen` flag on AuthExtender |
+| 6 | ISO A.8.3 | AccessControllerBridge escalation is single-key | High | M-of-N approval |
+| 7 | ISO A.5.29 | No emergency freeze | Medium | `frozen` flag on AccessControllerBridge |
 
 ---
 
-## 17. Trade-offs and Alternatives Considered
+## 16. Trade-offs and Alternatives Considered
 
-### 17.1 Rejected: ComponentLink (v2 Approach)
+### 16.1 Rejected: ComponentLink (v2 Approach)
 
 ActionRequest/ActionApproval hot-potato pair flowing through the component.
 
-**Why rejected**: The component needed protocol awareness (request creation, approval consumption). Higher coupling. The AuthExtender's borrow-use-return pattern gives the component a simpler interface — just read an `&OperationCap`.
+**Why rejected**: The component needed protocol awareness (request creation, approval consumption). Higher coupling. The AccessControllerBridge's borrow-use-return pattern gives the component a simpler interface — just read an `&OperationCap`.
 
-### 17.2 Rejected: Persistent Capabilities Held by AuthExtender
+### 16.2 Rejected: Persistent Capabilities Held by AccessControllerBridge
 
-The AuthExtender creates and stores persistent `Capability` objects (from `tf_components`). On borrow, it wraps a stored Capability in a hot-potato shell. On return, it unwraps and re-stores.
+The AccessControllerBridge creates and stores persistent `Capability` objects (from `tf_components`). On borrow, it wraps a stored Capability in a hot-potato shell. On return, it unwraps and re-stores.
 
-**Why rejected**: Requires the audit trail to keep its RoleMap (defeating the purpose of externalization). Creates state management complexity inside the AuthExtender (tracking stored capabilities). Pre-created capabilities need synchronization with the audit trail's RoleMap.
+**Why rejected**: Requires the audit trail to keep its RoleMap (defeating the purpose of externalization). Creates state management complexity inside the AccessControllerBridge (tracking stored capabilities). Pre-created capabilities need synchronization with the audit trail's RoleMap.
 
 The ephemeral `OperationCap` approach is cleaner — create on borrow, destroy on return, no persistent state.
 
-### 17.3 Rejected: Embedded RBAC
+### 16.3 Rejected: Embedded RBAC
 
 Keep RoleMap inside each component. Have hierarchies issue Capabilities.
 
 **Why rejected**: Per-trail governance silos. Stale tokens. Entangled data and governance lifecycle. Reinvents what hierarchies solves.
 
-### 17.4 Rejected: Three-Level Permission Model
+### 16.4 Rejected: Three-Level Permission Model
 
 Three flat permission sets (attester/accreditor/admin). All attesters get the same permissions.
 
 **Why rejected**: Discards hierarchies' property-level granularity. Gives accreditors operational access they shouldn't have. `validate_property` only works for attesters — the design was fighting hierarchies.
 
-### 17.5 Rejected: Drop All Generics
+### 16.5 Rejected: Drop All Generics
 
 One concrete `Permission` type for all components. No phantom P.
 
 **Why rejected**: Loses compile-time type safety between components. Source binding provides runtime safety, but phantom P is cheap defense in depth.
 
-### 17.6 Accepted: u16 Action Codes
+### 16.6 Accepted: u16 Action Codes
 
 Less readable than enum variants. Mitigated by named accessor functions (`actions::add_record()`).
 
-### 17.7 Accepted: Caller-Provided Property Values
+### 16.7 Accepted: Caller-Provided Property Values
 
 The caller declares which property values they're claiming. This could be seen as a trust concern (caller controls the input). But the federation validates the claim against live state — lying about values is caught. And the values are recorded on-chain for audit.
 
-### 17.8 Accepted: PTB Complexity (Three Steps)
+### 16.8 Accepted: PTB Complexity (Three Steps)
 
 Borrow–Use–Return is three calls per PTB. The explicit flow is a feature for security and auditability. SDK helpers can compose the steps:
 
@@ -2092,20 +2068,20 @@ Borrow–Use–Return is three calls per PTB. The explicit flow is a feature for
 // SDK helper
 async function addRecord(trail, extender, federation, capType, propValues, data) {
   const tx = new PTB();
-  const cap = tx.moveCall("auth_extender::borrow", [extender, federation, capType, propValues, clock]);
+  const cap = tx.moveCall("access_controller_bridge::borrow", [extender, federation, capType, propValues, clock]);
   tx.moveCall("audit_trail::add_record", [trail, cap, data, metadata, clock]);
-  tx.moveCall("auth_extender::return_cap", [extender, cap, clock]);
+  tx.moveCall("access_controller_bridge::return_cap", [extender, cap, clock]);
   return tx.execute();
 }
 ```
 
-### 17.9 Accepted: Multiple Operations Per Borrow
+### 16.9 Accepted: Multiple Operations Per Borrow
 
 A single `OperationCap` can be used for multiple operations. This is more efficient than per-operation authorization but means the cap's permissions are "live" for the entire PTB duration.
 
 **Mitigation**: The PTB is atomic — either all operations succeed or none do. The cap is always returned in the same PTB. There's no window where the cap exists without being returned.
 
-### 17.10 Trade-off: OperationCap Carries All Permissions
+### 16.10 Trade-off: OperationCap Carries All Permissions
 
 The `OperationCap` carries the full permission set of the capability type, not just the specific action being performed. The component checks the specific permission per operation.
 
@@ -2117,25 +2093,25 @@ The `OperationCap` carries the full permission set of the capability type, not j
 
 ---
 
-## 18. Conclusion
+## 17. Conclusion
 
-The AuthExtender externalizes authorization from components through a **Borrow–Use–Return** pattern. Components become pure data containers. The AuthExtender — positioned as part of the hierarchies ecosystem — translates federation trust assertions into ephemeral operational capabilities.
+The AccessControllerBridge externalizes authorization from components through a **Borrow–Use–Return** pattern. Components become pure data containers. The AccessControllerBridge — positioned as part of the hierarchies ecosystem — translates federation trust assertions into ephemeral operational capabilities.
 
 The design rests on six key decisions:
 
-1. **Capability Type as abstraction**: Users borrow named capability types, not raw property-to-action mappings. The AuthExtender translates internally. Users think in terms of "what role am I?" not "which properties grant which actions?"
+1. **Capability Type as abstraction**: Users borrow named capability types, not raw property-to-action mappings. The AccessControllerBridge translates internally. Users think in terms of "what role am I?" not "which properties grant which actions?"
 
-2. **Borrow–Use–Return lifecycle**: A single `OperationCap` is borrowed from the AuthExtender, used (by reference) with the target component, and returned. The hot potato pattern (no `drop`) enforces this lifecycle structurally.
+2. **Borrow–Use–Return lifecycle**: A single `OperationCap` is borrowed from the AccessControllerBridge, used (by reference) with the target component, and returned. The hot potato pattern (no `drop`) enforces this lifecycle structurally.
 
 3. **Attester as output**: Only attesters can borrow operational capabilities. `validate_properties()` is the federation API. No modifications to hierarchies.
 
 4. **Ephemeral capabilities**: `OperationCap` is created at borrow time, destroyed at return time. No persistent tokens, no denylists, no off-chain tracking. Revocation is immediate (federation state check at borrow time).
 
-5. **Component simplicity**: The target component receives `&OperationCap`, checks permissions and source. It knows nothing about hierarchies, federations, properties, or the AuthExtender's internals. Pure data store with permission checks.
+5. **Component simplicity**: The target component receives `&OperationCap`, checks permissions and source. It knows nothing about hierarchies, federations, properties, or the AccessControllerBridge's internals. Pure data store with permission checks.
 
-6. **Protocol layer decoupled from hierarchies**: `tf_components::operation_cap` uses generic types (`String`, `vector<u8>`) for validated scope — no dependency on hierarchies. The AuthExtender converts to `PropertyName`/`PropertyValue` at the boundary. This means `tf_components` is a pure protocol layer, and components have zero coupling to the authority system. Any authority adapter (federation-backed, standalone, AA) that can produce `OperationCap` with the right source works.
+6. **Protocol layer decoupled from hierarchies**: `tf_components::operation_cap` contains no domain knowledge — just `target`, `permissions`, `holder`, `source`. No property names, no property values, no dependency on hierarchies. The AccessControllerBridge converts hierarchies types internally and captures validated scope in events. This means `tf_components` is a pure protocol layer, and components have zero coupling to the authority system. Any authority adapter (federation-backed, standalone, AA) that can produce `OperationCap` with the right source works.
 
-**The AuthExtender is the single translation layer** between the world of trust (hierarchies) and the world of operations (components). It transforms "you are accredited to attest about X" into "you may perform actions Y on component Z" — within a single PTB, with full on-chain traceability, and with immediate revocation through live federation state checks.
+**The AccessControllerBridge is the single translation layer** between the world of trust (hierarchies) and the world of operations (components). It transforms "you are accredited to attest about X" into "you may perform actions Y on component Z" — within a single PTB, with full on-chain traceability, and with immediate revocation through live federation state checks.
 
 ---
 
@@ -2148,14 +2124,13 @@ The design rests on six key decisions:
 │  OperationCap<phantom P> {                                            │
 │    target: ID,                                                        │
 │    permissions: VecSet<u16>,                                          │
-│    validated_scope: VecMap<String, vector<u8>>,                       │
 │    holder: address,                                                   │
 │    source: ID        ← unforgeable via &UID witness                  │
 │  }                                                                    │
 │                                                                       │
 │  new(&UID, ...)     destroy(&UID, cap)     has_permission(&cap, u16) │
 │                                                                       │
-│  Generic types. No hierarchies dependency. Phantom P for safety.     │
+│  Minimal authorization token. No domain knowledge. Phantom P safety. │
 └──────────────────────────────┬────────────────────────────────────────┘
                                │
               ┌────────────────┼────────────────┐
@@ -2183,9 +2158,9 @@ The design rests on six key decisions:
                    borrow()  │  return_cap()
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│ auth_extender::main                                                    │
+│ access_controller_bridge::main                                                    │
 │                                                                       │
-│  AuthExtender<phantom P> {                                            │
+│  AccessControllerBridge<phantom P> {                                            │
 │    target_id: ID,                                                     │
 │    authority: FederationBacked { federation_id }                      │
 │              | Standalone { groups, admins },                         │
@@ -2230,7 +2205,7 @@ The design rests on six key decisions:
 let mut props = vec_map::empty();
 props.insert(string::utf8(b"catch_logging"), b"Cod");
 
-let cap = auth_extender::borrow(
+let cap = access_controller_bridge::borrow(
     &extender,
     &federation,
     string::utf8(b"catch_logger"),
@@ -2238,7 +2213,7 @@ let cap = auth_extender::borrow(
     clock,
     ctx,
 );
-// AuthExtender internally:
+// AccessControllerBridge internally:
 //   1. Looks up "catch_logger" → requires [catch_logging]
 //   2. Converts "catch_logging" → PropertyName, "Cod" → PropertyValue
 //   3. validate_properties(fisherman, {catch_logging: Cod})? YES
@@ -2249,7 +2224,7 @@ audit_trail::add_record(&mut trail, &cap, catch_data, metadata, clock, ctx);
 // Trail checks: target ✓, source ✓, has_permission(AddRecord) ✓, holder ✓
 
 // Step 3: Return capability
-auth_extender::return_cap(&extender, cap, clock);
+access_controller_bridge::return_cap(&extender, cap, clock);
 ```
 
 ### B.2 Fisherman Tries Mackerel (Not Accredited)
@@ -2258,7 +2233,7 @@ auth_extender::return_cap(&extender, cap, clock);
 let mut props = vec_map::empty();
 props.insert(string::utf8(b"catch_logging"), b"Mackerel");
 
-let cap = auth_extender::borrow(
+let cap = access_controller_bridge::borrow(
     &extender, &federation,
     string::utf8(b"catch_logger"),
     props, clock, ctx,
@@ -2274,7 +2249,7 @@ let mut props = vec_map::empty();
 props.insert(string::utf8(b"catch_logging"), b"allow_any");
 props.insert(string::utf8(b"catch_management"), b"allow_any");
 
-let cap = auth_extender::borrow(
+let cap = access_controller_bridge::borrow(
     &extender, &federation,
     string::utf8(b"catch_manager"),
     props, clock, ctx,
@@ -2286,13 +2261,13 @@ let cap = auth_extender::borrow(
 audit_trail::delete_record(&mut trail, &cap, seq, clock, ctx);
 // has_permission(DeleteRecord) ✓
 
-auth_extender::return_cap(&extender, cap, clock);
+access_controller_bridge::return_cap(&extender, cap, clock);
 ```
 
 ### B.4 Maritime Authority Deletes a Trail
 
 ```move
-let cap = auth_extender::borrow_governance(
+let cap = access_controller_bridge::borrow_governance(
     &extender, &federation,
     actions::delete_audit_trail(),
     clock, ctx,
@@ -2302,7 +2277,7 @@ let cap = auth_extender::borrow_governance(
 
 audit_trail::delete_trail(trail, &cap, clock, ctx);
 
-auth_extender::return_cap(&extender, cap, clock);
+access_controller_bridge::return_cap(&extender, cap, clock);
 ```
 
 ### B.5 Multiple Operations in One PTB
@@ -2311,7 +2286,7 @@ auth_extender::return_cap(&extender, cap, clock);
 let mut props = vec_map::empty();
 props.insert(string::utf8(b"catch_logging"), b"Cod");
 
-let cap = auth_extender::borrow(
+let cap = access_controller_bridge::borrow(
     &extender, &federation,
     string::utf8(b"catch_logger"),
     props, clock, ctx,
@@ -2322,7 +2297,7 @@ audit_trail::add_record(&mut trail, &cap, catch_data_1, metadata1, clock, ctx);
 audit_trail::add_record(&mut trail, &cap, catch_data_2, metadata2, clock, ctx);
 audit_trail::correct_record(&mut trail, &cap, seq, corrected_data, clock, ctx);
 
-auth_extender::return_cap(&extender, cap, clock);
+access_controller_bridge::return_cap(&extender, cap, clock);
 ```
 
 ### B.6 Full Bootstrap
@@ -2336,7 +2311,7 @@ hierarchies::add_property(&mut federation, property_name::new(b"catch_management
 // 2. Trail
 let trail = audit_trail::create(data, locking_config, metadata, clock, ctx);
 
-// 3. AuthExtender
+// 3. AccessControllerBridge
 let catch_logger = capability_type_config::new(
     vector[string::utf8(b"catch_logging")],
     vec_set::from_keys(vector[actions::add_record(), actions::correct_record()]),
@@ -2356,7 +2331,7 @@ let gov_actions = vec_set::from_keys(vector[
     actions::delete_audit_trail(), actions::migrate(),
 ]);
 
-let extender = auth_extender::create_federation_extender<AuditTrailPerm>(
+let extender = access_controller_bridge::create_federation_extender<AuditTrailPerm>(
     &federation, trail.id(), cap_types, gov_actions, clock, ctx,
 );
 
@@ -2389,7 +2364,7 @@ hierarchies::accredit_to_accredit(&mut federation, inspector,
 ```mermaid
 sequenceDiagram
     participant Fish as Fisherman (Attester)
-    participant AE as AuthExtender
+    participant AE as AccessControllerBridge
     participant Fed as Federation
     participant Trail as AuditTrail
 
@@ -2398,7 +2373,8 @@ sequenceDiagram
     AE->>AE: Convert String/bytes →<br/>PropertyName/PropertyValue
     AE->>Fed: validate_properties(fish,<br/>{catch_logging: Cod})?
     Fed-->>AE: YES
-    AE->>AE: operation_cap::new(&self.id,<br/>target, {AddRecord, CorrectRecord},<br/>{catch_logging: Cod}, fish_addr)
+    AE->>AE: Emit CapabilityBorrowed event<br/>(validated_scope: {catch_logging: Cod})
+    AE->>AE: operation_cap::new(&self.id,<br/>target, {AddRecord, CorrectRecord}, fish_addr)
     AE-->>Fish: OperationCap { source: extender_id }
 
     Fish->>Trail: add_record(&cap, data, ...)
@@ -2416,7 +2392,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Bad as Unauthorized Entity
-    participant AE as AuthExtender
+    participant AE as AccessControllerBridge
     participant Fed as Federation
 
     Bad->>AE: borrow("catch_logger",<br/>{catch_logging: Cod})
@@ -2425,12 +2401,12 @@ sequenceDiagram
     Note over AE: ABORT — borrow fails
 ```
 
-### C.3 Rogue AuthExtender Mitigated
+### C.3 Rogue AccessControllerBridge Mitigated
 
 ```mermaid
 sequenceDiagram
     participant Attacker
-    participant AE2 as Rogue AuthExtender (0xDEF)
+    participant AE2 as Rogue AccessControllerBridge (0xDEF)
     participant Trail as Trail (trusted: 0xABC)
 
     Attacker->>AE2: borrow(...)
@@ -2444,7 +2420,7 @@ sequenceDiagram
 ```text
 Federation "NorthAtlanticFisheries"
   │
-  ├── AuthExtender<AuditTrailPerm>    ──► AuditTrail "CatchRecords"
+  ├── AccessControllerBridge<AuditTrailPerm>    ──► AuditTrail "CatchRecords"
   │     capability_types:
   │       "catch_logger"  → requires [catch_logging],
   │                         grants {AddRecord, CorrectRecord}
@@ -2452,13 +2428,13 @@ Federation "NorthAtlanticFisheries"
   │                         grants {+DeleteRecord, UpdateMetadata}
   │     governance: {DeleteTrail, Migrate}
   │
-  ├── AuthExtender<AuditTrailPerm>    ──► AuditTrail "SafetyInspections"
+  ├── AccessControllerBridge<AuditTrailPerm>    ──► AuditTrail "SafetyInspections"
   │     capability_types:
   │       "safety_inspector" → requires [vessel_safety],
   │                            grants {AddRecord, CorrectRecord, UpdateMetadata}
   │     governance: {DeleteTrail, Migrate}
   │
-  └── AuthExtender<IdentityPerm>      ──► IdentityComponent (future)
+  └── AccessControllerBridge<IdentityPerm>      ──► IdentityComponent (future)
         capability_types:
           "crew_manager" → requires [crew_identity],
                            grants {CreateCredential, UpdateCredential}
@@ -2484,10 +2460,10 @@ flowchart LR
         B_Fed -.->|"no connection"| B_Trail
     end
 
-    subgraph after["AFTER: AuthExtender"]
+    subgraph after["AFTER: AccessControllerBridge"]
         direction TB
         A_Fed["Federation"]
-        A_AE["AuthExtender<br/>+ CapabilityTypes"]
+        A_AE["AccessControllerBridge<br/>+ CapabilityTypes"]
         A_Trail["AuditTrail<br/>(pure data)<br/>12 Actions"]
         A_User["User"]
         A_User -->|"1. borrow(type)"| A_AE
@@ -2503,7 +2479,7 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     participant User
-    participant AE as AuthExtender
+    participant AE as AccessControllerBridge
     participant Trail as AuditTrail
 
     rect rgb(230, 245, 255)
