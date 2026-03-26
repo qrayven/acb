@@ -1789,7 +1789,11 @@ public fun borrow<P>(
 }
 ```
 
-### 13.3 Why the Pattern Is AA-Ready
+### 13.3 AA for Governance Quorum
+
+AA also addresses a key compliance concern: single-key privilege escalation on the AccessControllerBridge. A root authority address can be an AA account with a quorum-based `AuthenticatorFunction` — requiring M-of-N signers to approve governance transactions (updating capability types, modifying permissions, freezing the bridge). This places M-of-N enforcement at the authentication layer, without adding quorum logic to the bridge or hierarchies.
+
+### 13.4 Why the Pattern Is AA-Ready
 
 The target component doesn't care HOW the `OperationCap` is produced. AA is just another adapter. When AA ships, existing components and AccessControllerBridges continue to work — and new AA adapters can serve the same components.
 
@@ -1948,7 +1952,7 @@ The `CapabilityBorrowed` event includes `validated_scope` — the property names
 | Pseudonymization | Not implemented | Use DIDs |
 | Purpose limitation | Not enforced | Application-level concern |
 | Data minimization | Not enforced | Hash-only on-chain |
-| Retention policies | Partial (locking/deletion) | No automatic expiration |
+| Data retention (Art. 5(1)(e)) | Partial — manual `delete_record` exists, `LockingConfig` controls when deletion is allowed | No auto-expiry on records (e.g., TTL or "delete after N years"). Note: hierarchies' timespan handles *authorization* expiry, not *data* retention |
 
 ### 15.2 ISO 27001
 
@@ -1974,9 +1978,9 @@ The `CapabilityBorrowed` event includes `validated_scope` — the property names
 
 **Recommendation**: Time-locked recovery or social recovery mechanism at the hierarchies level.
 
-**A.8.3 AccessControllerBridge Configuration Escalation**: Single root authority can modify AccessControllerBridge capability type permissions.
+**A.8.3 AccessControllerBridge Configuration Escalation**: A single root authority can modify AccessControllerBridge capability type permissions.
 
-**Recommendation**: M-of-N approval for privilege escalation. At minimum, emit events for monitoring.
+**Recommendation**: Account Abstraction provides the natural solution — the root authority address can be an AA account with a quorum-based `AuthenticatorFunction` requiring M-of-N signers to approve governance transactions (configuration changes, privilege escalation). This places the M-of-N enforcement at the authentication layer where it belongs, without adding quorum logic to the bridge itself. At minimum, emit events for monitoring.
 
 **A.5.29 No Emergency Freeze**: No mechanism to immediately halt all operations during a security incident.
 
@@ -2013,7 +2017,7 @@ public fun unfreeze<P>(
 | 3 | GDPR Art. 6 | Public accreditation status | Medium | Pseudonymous identifiers; ZK proofs |
 | 4 | GDPR Art. 25 | Validated scope in events may contain PII | Medium | Non-PII property values; hashes/codes |
 | 5 | ISO A.8.2 | No recovery for total root key loss | Critical | Social recovery mechanism |
-| 6 | ISO A.8.3 | AccessControllerBridge escalation is single-key | High | M-of-N approval |
+| 6 | ISO A.8.3 | AccessControllerBridge escalation is single-key | High | M-of-N via Account Abstraction (quorum on root authority address) |
 | 7 | ISO A.5.29 | No emergency freeze | Medium | `frozen` flag on AccessControllerBridge |
 
 ---
