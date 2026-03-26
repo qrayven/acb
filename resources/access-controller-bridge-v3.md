@@ -283,7 +283,7 @@ Only **attesters** can borrow capabilities from the AccessControllerBridge. Accr
 
 ## 6. Guiding Principles
 
-### 7.1 Separation of Concerns
+### 6.1 Separation of Concerns
 
 Three clean layers, each with a single responsibility:
 
@@ -295,26 +295,26 @@ Three clean layers, each with a single responsibility:
 
 The adapter knows about both hierarchies and the protocol layer. The component only knows about the protocol layer. Hierarchies knows about neither.
 
-### 7.2 Composability via PTBs
+### 6.2 Composability via PTBs
 
 IOTA's programmable transaction blocks compose multiple package calls in a single atomic transaction. The Borrow–Use–Return pattern works within this model: all three calls happen atomically. If any step fails, the entire transaction aborts.
 
-### 7.3 Move-Native Idioms
+### 6.3 Move-Native Idioms
 
 - **Hot potatoes** (no `drop` ability): OperationCap must be returned. Cannot be ignored or leaked.
 - **`&UID` witness**: Only the AccessControllerBridge module can create and destroy OperationCaps stamped with its ID. Unforgeable.
 - **Phantom types**: `OperationCap<phantom P>` provides compile-time type safety between components.
 - **By-reference consumption**: The target component reads the cap via `&OperationCap<P>` — it never takes ownership.
 
-### 7.4 Component Agnosticism
+### 6.4 Component Agnosticism
 
 The OperationCap pattern works for any shared object with protected operations: audit trails, identity credentials, future data registries. The component stores one `trusted_source: ID` and checks incoming caps against it.
 
-### 7.5 Authority Source Agnosticism
+### 6.5 Authority Source Agnosticism
 
 The component stores `trusted_source: ID`. It doesn't know whether the source is an AccessControllerBridge, an AA adapter, or a future DAO governor. Any authority that can produce `OperationCap<P>` with the right source ID works. Different authorization models are different adapter objects — each with its own package and lifecycle — not variants inside a single object. The `trusted_source: ID` is the extensibility point.
 
-### 7.6 Respect Hierarchies' Design
+### 6.6 Respect Hierarchies' Design
 
 The AccessControllerBridge uses hierarchies exactly as designed:
 - `validate_property()` / `validate_properties()` for attester authorization
@@ -465,6 +465,10 @@ public struct AccessControllerBridge<phantom P> has key, store {
     /// Action codes reserved for governance (root authority only).
     /// These require no property validation — root authority identity check only.
     governance_actions: VecSet<u16>,
+    /// Emergency freeze flag. When true, all borrow() and borrow_governance()
+    /// calls fail immediately. Only root authority can freeze/unfreeze.
+    /// Provides an emergency brake during security incidents (ISO A.5.29).
+    frozen: bool,
     /// Package version for migration support
     version: u64,
 }
@@ -474,14 +478,47 @@ public struct AccessControllerBridge<phantom P> has key, store {
 /// Defines the mapping from a user-facing capability name to:
 /// 1. Which properties must be validated in the federation
 /// 2. Which permissions the resulting OperationCap grants
+///
+/// INVARIANT: required_properties MUST be non-empty. An empty list
+/// would cause validate_properties() to be called with an empty map,
+/// which trivially passes for any attester — bypassing property-level
+/// authorization entirely. This invariant is enforced by
+/// validate_capability_type_config().
+///
+/// INVARIANT: granted_permissions MUST be non-empty. A capability type
+/// that grants no permissions is meaningless.
 public struct CapabilityTypeConfig has copy, drop, store {
     /// Property names that must be validated for the requesting entity.
     /// The AccessControllerBridge calls validate_properties() with these names
     /// and the values provided by the requester.
+    /// MUST be non-empty — enforced at creation/update time.
     required_properties: vector<String>,
     /// Action codes granted by this capability type.
     /// These become the OperationCap's permissions.
+    /// MUST be non-empty — enforced at creation/update time.
     granted_permissions: VecSet<u16>,
+}
+
+/// Validate a CapabilityTypeConfig before accepting it.
+/// Prevents security-critical misconfigurations.
+fun validate_capability_type_config(config: &CapabilityTypeConfig) {
+    // CRITICAL: empty required_properties would bypass property validation,
+    // allowing any attester in the federation to borrow this capability type
+    // regardless of their accreditation scope.
+    assert!(!config.required_properties.is_empty());
+    // A capability type that grants nothing is meaningless
+    assert!(!config.granted_permissions.is_empty());
+}
+
+/// Verify the caller is a root authority of the federation linked to this bridge.
+/// Used by all governance/management functions.
+fun assert_root_authority<P>(
+    bridge: &AccessControllerBridge<P>,
+    federation: &Federation,
+    ctx: &TxContext,
+) {
+    assert!(bridge.federation_id == federation.federation_id());
+    assert!(federation.is_root_authority(&ctx.sender().to_id()));
 }
 ```
 
@@ -498,16 +535,10 @@ AccessControllerBridge for "CatchRecords" trail:
         granted_permissions: {AddRecord, CorrectRecord}
     }
     "catch_manager" → {
-        required_properties: ["catch_management"],
-        granted_permissions: {AddRecord, CorrectRecord, DeleteRecord,
-                              UpdateMetadata, DeleteMetadata,
-                              UpdateLockingConfig}
-    }
-    "catch_inspector" → {
         required_properties: ["catch_logging", "catch_management"],
         granted_permissions: {AddRecord, CorrectRecord, DeleteRecord,
                               UpdateMetadata, DeleteMetadata,
-                              UpdateLockingConfig, DeleteAllRecords}
+                              UpdateLockingConfig}
     }
 
   governance_actions: {DeleteAuditTrail, Migrate}
@@ -517,9 +548,11 @@ AccessControllerBridge for "CatchRecords" trail:
 
 - A user borrowing capability type `"catch_logger"` must be an attester for the `catch_logging` property. They provide the property value (e.g., `Cod`). The AccessControllerBridge validates `catch_logging = Cod` against the federation. If valid, they get an `OperationCap` with `{AddRecord, CorrectRecord}`.
 
-- A user borrowing `"catch_inspector"` must be an attester for BOTH `catch_logging` AND `catch_management`. They provide values for both. Both must validate. If valid, they get the full permission set.
+- A user borrowing `"catch_manager"` must be an attester for BOTH `catch_logging` AND `catch_management`. They provide values for both. Both must validate. If valid, they get the full permission set.
 
 - Governance actions (`DeleteAuditTrail`, `Migrate`) are not part of any capability type. They require root authority status, checked separately.
+
+**Note on action code overlap**: An action code MAY appear in both `governance_actions` and a capability type's `granted_permissions`. This is intentional — it means the action is available to both root authorities (via governance path, no property validation) and qualified attesters (via capability type, with property validation). The two paths are independent and use different validation logic.
 
 ### 7.4 Action Codes
 
@@ -730,12 +763,19 @@ public fun create<P>(
     target_id: ID,
     capability_types: VecMap<String, CapabilityTypeConfig>,
     governance_actions: VecSet<u16>,
-    clock: &Clock,
     ctx: &mut TxContext,
 ): AccessControllerBridge<P> {
     // Verify caller is root authority
     let sender_id = ctx.sender().to_id();
     assert!(federation.is_root_authority(&sender_id));
+
+    // Validate all capability type configs
+    let keys = capability_types.keys();
+    let mut i = 0;
+    while (i < keys.length()) {
+        validate_capability_type_config(capability_types.get(&keys[i]));
+        i = i + 1;
+    };
 
     let bridge = AccessControllerBridge {
         id: object::new(ctx),
@@ -743,6 +783,7 @@ public fun create<P>(
         federation_id: federation.federation_id(),
         capability_types,
         governance_actions,
+        frozen: false,
         version: PACKAGE_VERSION,
     };
 
@@ -797,7 +838,7 @@ let gov_actions = vec_set::from_keys(vector[
 
 // Create the AccessControllerBridge
 let bridge = access_controller_bridge::create<AuditTrailPerm>(
-    &federation, trail_id, cap_types, gov_actions, clock, ctx,
+    &federation, trail_id, cap_types, gov_actions, ctx,
 );
 ```
 
@@ -805,14 +846,20 @@ let bridge = access_controller_bridge::create<AuditTrailPerm>(
 
 ```move
 /// Set the trusted authority source for this trail.
-/// Only callable by the trail creator (or root authority).
+/// Only callable by the trail creator.
+///
+/// IMPORTANT: If the creator address is lost, the trail's trusted_source
+/// can never be changed. For production deployments, consider making the
+/// creator an AA account with recovery mechanisms, or adding a governance
+/// path via the existing trusted_source (allowing the current authority
+/// to authorize a source change via a governance OperationCap).
 public fun set_trusted_source<D: store + copy>(
     trail: &mut AuditTrail<D>,
     trusted_source: ID,
     ctx: &TxContext,
 ) {
     assert!(ctx.sender() == trail.creator);
-    trail.trusted_source = trusted_source;
+    trail.trusted_source = option::some(trusted_source);
 }
 ```
 
@@ -907,7 +954,7 @@ sequenceDiagram
     RA->>AE: create(<br/>  capability_types: {<br/>    "catch_logger" → {<br/>      required: [catch_logging],<br/>      grants: {AddRecord, CorrectRecord}<br/>    },<br/>    "catch_manager" → {<br/>      required: [catch_logging, catch_management],<br/>      grants: {+DeleteRecord, UpdateMetadata, ...}<br/>    }<br/>  },<br/>  governance: {DeleteTrail, Migrate})
     AE-->>RA: AccessControllerBridge created
 
-    RA->>Trail: set_trusted_source(extender_id)
+    RA->>Trail: set_trusted_source(bridge_id)
     Note right of Trail: Trail now trusts<br/>this AccessControllerBridge
 
     RA->>Fed: accredit_to_attest(fisherman_A, catch_logging=[Cod])
@@ -944,6 +991,7 @@ public fun borrow<P>(
     ctx: &TxContext,
 ): OperationCap<P> {
     assert!(bridge.version == PACKAGE_VERSION);
+    assert!(!bridge.frozen);
 
     // 1. Look up capability type
     assert!(bridge.capability_types.contains(&capability_type));
@@ -1029,6 +1077,7 @@ public fun borrow_governance<P>(
     ctx: &TxContext,
 ): OperationCap<P> {
     assert!(bridge.version == PACKAGE_VERSION);
+    assert!(!bridge.frozen);
 
     // Verify this is a governance action
     assert!(bridge.governance_actions.contains(&action));
@@ -1085,8 +1134,9 @@ public fun add_record<D: store + copy>(
     assert!(!locking::is_write_locked(&trail.locking_config, clock));
 
     // Authorization checks
+    assert!(trail.trusted_source.is_some());
     assert!(operation_cap::target(cap) == trail.id());
-    assert!(operation_cap::source(cap) == trail.trusted_source);
+    assert!(operation_cap::source(cap) == *trail.trusted_source.borrow());
     assert!(operation_cap::has_permission(cap, actions::add_record()));
     assert!(operation_cap::holder(cap) == ctx.sender());
 
@@ -1220,6 +1270,7 @@ public fun update_capability_type<P>(
     ctx: &TxContext,
 ) {
     assert_root_authority(bridge, federation, ctx);
+    validate_capability_type_config(&new_config);
     assert!(bridge.capability_types.contains(&capability_type));
 
     // Replace the config
@@ -1269,6 +1320,7 @@ public fun add_capability_type<P>(
     ctx: &TxContext,
 ) {
     assert_root_authority(bridge, federation, ctx);
+    validate_capability_type_config(&config);
     assert!(!bridge.capability_types.contains(&capability_type));
     bridge.capability_types.insert(capability_type, config);
 
@@ -1319,7 +1371,40 @@ public fun update_governance_actions<P>(
 }
 ```
 
-### 10.4 Upgrading the AccessControllerBridge Package
+### 10.4 Deleting an AccessControllerBridge
+
+```move
+/// Delete the AccessControllerBridge. Only root authority can delete.
+/// The target component's trusted_source will point to a non-existent
+/// object — all borrow attempts against it will fail (the bridge
+/// object no longer exists to produce OperationCaps).
+///
+/// IMPORTANT: After deletion, the target component is effectively
+/// frozen until a new trusted_source is set via set_trusted_source().
+public fun delete<P>(
+    bridge: AccessControllerBridge<P>,
+    federation: &Federation,
+    ctx: &TxContext,
+) {
+    assert!(bridge.federation_id == federation.federation_id());
+    assert!(federation.is_root_authority(&ctx.sender().to_id()));
+
+    let AccessControllerBridge {
+        id, target_id: _, federation_id: _,
+        capability_types: _, governance_actions: _,
+        frozen: _, version: _,
+    } = bridge;
+
+    event::emit(AccessControllerBridgeDeleted {
+        bridge_id: object::uid_to_inner(&id),
+        deleted_by: ctx.sender(),
+    });
+
+    object::delete(id);
+}
+```
+
+### 10.5 Upgrading the AccessControllerBridge Package
 
 When the `access_controller_bridge` package is upgraded (new version published):
 
@@ -1354,7 +1439,7 @@ public fun migrate<P>(
 
 **During migration downtime**: Between package upgrade and object migration, `borrow()` calls fail (`version != PACKAGE_VERSION`). This is a deliberate safety gate — the governance must explicitly migrate the object to the new version.
 
-### 10.5 Upgrading the Audit Trail Package
+### 10.6 Upgrading the Audit Trail Package
 
 When the `audit_trail` package is upgraded:
 
@@ -1374,7 +1459,7 @@ When the `audit_trail` package is upgraded:
 
 Steps 2 and 3 can happen in separate PTBs. Between steps 2 and 3, the new operation exists but no capability type grants it — secure by default.
 
-### 10.6 Upgrading the Hierarchies Package
+### 10.7 Upgrading the Hierarchies Package
 
 When the `hierarchies` package is upgraded:
 
@@ -1394,7 +1479,7 @@ When the `hierarchies` package is upgraded:
 5. System is live with new hierarchies
 ```
 
-### 10.7 Upgrading tf_components (Protocol Layer)
+### 10.8 Upgrading tf_components (Protocol Layer)
 
 This is the most impactful upgrade — `OperationCap` lives here.
 
@@ -1404,13 +1489,13 @@ This is the most impactful upgrade — `OperationCap` lives here.
 
 **Mitigation**: `tf_components` should be treated as the most stable layer. Changes to `OperationCap` should be extremely rare and backward-compatible where possible.
 
-### 10.8 Replacing an AccessControllerBridge Instance
+### 10.9 Replacing an AccessControllerBridge Instance
 
 If the AccessControllerBridge object itself needs to be replaced (not just upgraded):
 
 ```text
 1. Create new AccessControllerBridge (with updated configuration)
-2. Update target component: set_trusted_source(new_extender_id)
+2. Update target component: set_trusted_source(new_bridge_id)
 3. Old AccessControllerBridge can be deleted
 ```
 
@@ -1426,7 +1511,7 @@ If the AccessControllerBridge object itself needs to be replaced (not just upgra
 
 However, dual trusted_source adds complexity. For most scenarios, the brief interruption during `set_trusted_source` is acceptable.
 
-### 10.9 Version Compatibility Matrix
+### 10.10 Version Compatibility Matrix
 
 ```text
 ┌─────────────────────┬──────────────────────┬────────────┬───────────────┬───────────────┐
@@ -1468,7 +1553,9 @@ public struct AuditTrail<D: store + copy> has key, store {
     version: u64,
     /// The authority source this trail trusts.
     /// Points to the AccessControllerBridge's ID.
-    trusted_source: ID,
+    /// None until explicitly set via set_trusted_source().
+    /// When None, all protected operations fail (trail is inert).
+    trusted_source: Option<ID>,
 }
 ```
 
@@ -1488,13 +1575,14 @@ public fun delete_trail<D>(trail: AuditTrail<D>, cap: &OperationCap<AuditTrailPe
 public fun migrate<D>(trail: &mut AuditTrail<D>, cap: &OperationCap<AuditTrailPerm>, ...) { ... }
 ```
 
-Each function checks exactly three things:
+Each function performs these authorization checks:
 
 ```move
-assert!(operation_cap::target(cap) == trail.id());           // right component
-assert!(operation_cap::source(cap) == trail.trusted_source); // right authority
-assert!(operation_cap::has_permission(cap, EXPECTED_ACTION)); // right permission
-assert!(operation_cap::holder(cap) == ctx.sender());          // right sender
+assert!(trail.trusted_source.is_some());                              // source configured
+assert!(operation_cap::target(cap) == trail.id());                    // right component
+assert!(operation_cap::source(cap) == *trail.trusted_source.borrow()); // right authority
+assert!(operation_cap::has_permission(cap, EXPECTED_ACTION));          // right permission
+assert!(operation_cap::holder(cap) == ctx.sender());                   // right sender
 ```
 
 ### 11.4 What the Component Sees
@@ -2121,7 +2209,7 @@ let gov_actions = vec_set::from_keys(vector[
 ]);
 
 let bridge = access_controller_bridge::create<AuditTrailPerm>(
-    &federation, trail.id(), cap_types, gov_actions, clock, ctx,
+    &federation, trail.id(), cap_types, gov_actions, ctx,
 );
 
 // 4. Bind trail to bridge
@@ -2164,7 +2252,7 @@ sequenceDiagram
     Fed-->>AE: YES
     AE->>AE: Emit CapabilityBorrowed event<br/>(validated_scope: {catch_logging: Cod})
     AE->>AE: operation_cap::new(&self.id,<br/>target, {AddRecord, CorrectRecord}, fish_addr)
-    AE-->>Fish: OperationCap { source: extender_id }
+    AE-->>Fish: OperationCap { source: bridge_id }
 
     Fish->>Trail: add_record(&cap, data, ...)
     Trail->>Trail: target ✓ source ✓<br/>has_permission(AddRecord) ✓<br/>holder ✓
